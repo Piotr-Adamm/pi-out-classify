@@ -9,6 +9,7 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-ai": "*",
+    "@typesafe-ai/sdk": "*",
     "typebox": "*"
   }
 }
