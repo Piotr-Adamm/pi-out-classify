@@ -10,7 +10,11 @@ import {
   type OutputBatch,
   type TextBuffer,
 } from "./batcher.ts";
-import type { ClassificationTaskContext } from "./classifier.ts";
+import {
+  classifyTextBatches,
+  type ClassificationTaskContext,
+  type TextSectionClassifierResults,
+} from "./classifier.ts";
 import { loadConfig, type OutClassifyConfig } from "./config.ts";
 import { estimateBaseTokens, estimateSectionTokens } from "./estimator.ts";
 import { extractDocument, supportsDocumentExtraction, type ExtractedDocument } from "./extractor.ts";
@@ -207,10 +211,35 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       }
     }
 
-    // TODO: Classify text batches: one request per batch, one question per section (purpose, purposeSource).
+    // Failed batches come back as "unclassified"; only cancellation (Esc) throws.
+    let textResults: TextSectionClassifierResults = new Map();
+    if (batches.length > 0) {
+      let firstError: unknown;
+      try {
+        textResults = await classifyTextBatches(
+          batches,
+          context,
+          session.client,
+          ctx.signal,
+          (error) => { firstError ??= error; },
+        );
+      } catch {
+        return document ? documentOutput(document) : undefined;
+      }
+
+      const unclassified = [...textResults.values()].filter((result) => result === "unclassified").length;
+      if (unclassified > 0) {
+        ctx.ui.notify(
+          `out-classify: ${unclassified} of ${textResults.size} sections could not be classified ` +
+          `(${(firstError as Error)?.message ?? "unknown error"}).`,
+          "warning",
+        );
+      }
+    }
     // TODO: Classify figures and images with jevisual (session.client), with captions, if classifyImages.
 
-    // TODO: Return keep + uncertain in original order (content AND structuredContent).
-    // On classifier failure, return the original output (for documents, the extracted content).
+    // TODO: Return keep + uncertain + unclassified in original order (content AND structuredContent).
+    // If any section is unclassified, append one note for the agent:
+    // "[out-classify: N of M sections could not be classified (TypeSafe error) and are included unfiltered.]"
   });
 }
