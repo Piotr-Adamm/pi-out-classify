@@ -11,9 +11,11 @@ import {
   type TextBuffer,
 } from "./batcher.ts";
 import {
+  classifyImages,
   classifyTextBatches,
   type ClassificationTaskContext,
-  type TextSectionClassifierResults,
+  type ClassifierResults,
+  type ImageToClassify,
 } from "./classifier.ts";
 import { loadConfig, type OutClassifyConfig } from "./config.ts";
 import { estimateBaseTokens, estimateSectionTokens } from "./estimator.ts";
@@ -37,6 +39,7 @@ interface SessionState {
 
 // One image block of the tool output, kept unchanged for the rebuild. Counterpart of TextItem.
 interface ImageItem {
+  id: string; // image_<contentIndex>; key in ClassifierResults.
   contentIndex: number;
   block: ImageContent;
 }
@@ -179,7 +182,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
         if (block.type === "text") {
           textBuffer.push({ text: block.text, markdown, contentIndex });
         } else if (block.type === "image") {
-          imageBuffer.push({ contentIndex, block });
+          imageBuffer.push({ id: `image_${contentIndex}`, contentIndex, block });
         }
       }
     }
@@ -216,33 +219,52 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       }
     }
 
-    // Failed batches come back as "unclassified"; only cancellation (Esc) throws.
-    let textResults: TextSectionClassifierResults = new Map();
-    if (batches.length > 0) {
-      let firstError: unknown;
-      try {
-        textResults = await classifyTextBatches(
-          batches,
+    // Figures (documents) or non-document images, never both. Figures carry their caption, or without
+    // one the text of their linking section; other images are judged by the purpose only.
+    const images: ImageToClassify[] = document
+      ? figures.map((figure) => ({ id: figure.id, image: figure.image, caption: figure.caption || figure.context }))
+      : imageBuffer.map((image) => ({ id: image.id, image: image.block }));
+
+    // Text and images in parallel; a part below its threshold sends nothing. Failures come back as
+    // "unclassified"; only cancellation (Esc) throws.
+    let textError: unknown;
+    let imageError: unknown;
+    let textResults: ClassifierResults;
+    let imageResults: ClassifierResults;
+    try {
+      [textResults, imageResults] = await Promise.all([
+        classifyTextBatches(batches, context, session.client, ctx.signal, (error) => { textError ??= error; }),
+        classifyImages(
+          images.length >= config.thresholdImages ? images : [],
           context,
           session.client,
           ctx.signal,
-          (error) => { firstError ??= error; },
-        );
-      } catch {
-        return document ? documentOutput(document) : undefined;
-      }
-
-      const unclassified = [...textResults.values()].filter((result) => result === "unclassified").length;
-      if (unclassified > 0) {
-        ctx.ui.notify(
-          `out-classify: ${unclassified} of ${textResults.size} sections could not be classified ` +
-          `(${(firstError as Error)?.message ?? "unknown error"}).`,
-          "warning",
-        );
-      }
+          (error) => { imageError ??= error; },
+        ),
+      ]);
+    } catch {
+      return document ? documentOutput(document) : undefined;
     }
-    // TODO: Classify figures and images with jevisual (session.client), with captions, if their count
-    // reaches config.thresholdImages.
+
+    const unclassifiedSections = [...textResults.values()].filter((result) => result === "unclassified").length;
+    if (unclassifiedSections > 0) {
+      ctx.ui.notify(
+        `out-classify: ${unclassifiedSections} of ${textResults.size} sections could not be classified ` +
+        `(${(textError as Error)?.message ?? "unknown error"}).`,
+        "warning",
+      );
+    }
+    const unclassifiedImages = [...imageResults.values()].filter((result) => result === "unclassified").length;
+    if (unclassifiedImages > 0) {
+      ctx.ui.notify(
+        `out-classify: ${unclassifiedImages} of ${imageResults.size} images could not be classified ` +
+        `(${(imageError as Error)?.message ?? "animated or multi-page"}).`,
+        "warning",
+      );
+    }
+
+    // One map for the rebuild: results.get(section.id), results.get(image.id), results.get(figure.id).
+    const results: ClassifierResults = new Map([...textResults, ...imageResults]);
 
     // TODO: Return keep + uncertain + unclassified in original order (content AND structuredContent).
     // If any section is unclassified, append one note for the agent:
