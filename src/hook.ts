@@ -17,6 +17,7 @@ import {
   type ClassifierResults,
   type ImageToClassify,
 } from "./classifier.ts";
+import { CODEMODE_TOOL_NAME, parseCodemodeGoal } from "./codemode.ts";
 import { loadConfig, type OutClassifyConfig } from "./config.ts";
 import { reconstruct } from "./reconstructor.ts";
 import { estimateBaseTokens, estimateSectionTokens } from "./estimator.ts";
@@ -96,6 +97,14 @@ function documentOutput(document: ExtractedDocument, maxSectionChars: number) {
   };
 }
 
+// The goal the tool call states itself: read's goal parameter (added by out-classify's read override)
+// or the `// goal:` line of a codemode script. Empty if there is none.
+function toolCallGoal(event: ToolResultEvent): string {
+  if (event.toolName === "read" && typeof event.input.goal === "string") return event.input.goal.trim();
+  if (event.toolName.toLowerCase() === CODEMODE_TOOL_NAME) return parseCodemodeGoal(event.input.code);
+  return "";
+}
+
 export function registerOutputHook(pi: ExtensionAPI): void {
   // Resolved once per session; /reload fires session_start again, so config and key changes apply then.
   let session: SessionState | undefined;
@@ -150,10 +159,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     }
 
     // Without an explicit goal, judge the output against the user's latest messages.
-    // goal is the parameter added by out-classify's read override.
-    const inputGoal = event.toolName === "read" && typeof event.input.goal === "string"
-      ? event.input.goal.trim()
-      : "";
+    const inputGoal = toolCallGoal(event);
     const userMessages = inputGoal ? [] : lastUserMessages(ctx, GOAL_MESSAGE_COUNT);
     const goal = inputGoal || userMessages.join("\n\n");
     // Documents still need extraction without a goal; they return unclassified below.
