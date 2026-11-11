@@ -10,5 +10,5 @@
     "skipLibCheck": true
   },
   "include": ["**/*.ts"],
-  "exclude": [".venv", ".models", ".unipi", "node_modules"]
+  "exclude": [".unipi", "node_modules"]
 }

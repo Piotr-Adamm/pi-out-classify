@@ -7,7 +7,7 @@ import {
 } from "@typesafe-ai/sdk";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { Buffer } from "node:buffer";
-import { independentlyClassifyVisuals } from "../../jevisual/src/api.ts";
+import { independentlyClassifyVisuals } from "pi-jevisual/api";
 import type { OutputBatch, OutputSection } from "./batcher.ts";
 
 // "unclassified": the request for this section failed; the rebuild keeps it like "keep".

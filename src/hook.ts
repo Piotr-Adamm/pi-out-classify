@@ -1,7 +1,7 @@
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import type { TypeSafeClient } from "@typesafe-ai/sdk";
-import { createClient } from "../../jevisual/src/api.ts";
+import { createClient } from "pi-jevisual/api";
 import {
   addFigureContext,
   batchSections,
