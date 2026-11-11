@@ -30,6 +30,9 @@ const BATCH_TOKEN_MARGIN = 0.8;
 // Without a purpose argument, the output is judged against this many of the latest user messages.
 const PURPOSE_MESSAGE_COUNT = 2;
 const MARKDOWN_PATH = /\.(md|markdown)$/i;
+// pi's read appends this when it truncates a file, e.g. "[Showing lines 1-2000 of 5000. Use offset=2001 to
+// continue.]". It is never classified, so the agent always learns where to continue.
+const READ_FOOTER = /\n\n\[[^\]\n]*Use offset=\d+ to continue\.\]$/;
 
 // Everything resolved once per session_start; undefined means out-classify is off.
 interface SessionState {
@@ -156,6 +159,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
 
     const textBuffer: TextBuffer = [];
     const imageBuffer: ImageBuffer = [];
+    let readFooter = "";
     let document: ExtractedDocument | undefined;
 
     if (outputType === "document") {
@@ -182,7 +186,9 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       const markdown = typeof path === "string" && MARKDOWN_PATH.test(path);
       for (const [contentIndex, block] of event.content.entries()) {
         if (block.type === "text") {
-          textBuffer.push({ text: block.text, markdown, contentIndex });
+          const footer = event.toolName === "read" ? block.text.match(READ_FOOTER)?.[0] ?? "" : "";
+          readFooter ||= footer.trimStart();
+          textBuffer.push({ text: block.text.slice(0, block.text.length - footer.length), markdown, contentIndex });
         } else if (block.type === "image") {
           imageBuffer.push({ id: `image_${contentIndex}`, contentIndex, block });
         }
@@ -277,7 +283,10 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     const classifiedSections = batches.length > 0 ? batches.flatMap((batch) => batch.sections) : sections;
     const readOffset = event.toolName === "read" && typeof event.input.offset === "number" ? event.input.offset : 1;
     return {
-      content: reconstruct({ sections: classifiedSections, results, document, images: imageBuffer, readOffset }),
+      content: [
+        ...reconstruct({ sections: classifiedSections, results, document, images: imageBuffer, readOffset }),
+        ...(readFooter ? [{ type: "text" as const, text: readFooter }] : []),
+      ],
     };
   });
 }
