@@ -74,6 +74,12 @@ function lastUserMessages(ctx: ExtensionContext, count: number): string[] {
   return messages;
 }
 
+// The extracted document as tool output, used whenever it is not (or cannot be) classified.
+// TODO: Include the figures (same as the rebuild).
+function documentOutput(document: ExtractedDocument) {
+  return { content: [{ type: "text" as const, text: document.markdown }] };
+}
+
 export function registerOutputHook(pi: ExtensionAPI): void {
   // Resolved once per session; /reload fires session_start again, so config and key changes apply then.
   let session: SessionState | undefined;
@@ -114,11 +120,24 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     if (outputType === "empty") return;
     if (event.isError) return;
 
+    // Thresholds: a part below its threshold passes through unclassified. Documents are
+    // checked after extraction, because only the extracted text counts.
+    let classifyText = true;
+    let classifyImages = true;
+    if (outputType !== "document") {
+      const textChars = event.content.reduce((sum, block) => block.type === "text" ? sum + block.text.length : sum, 0);
+      const imageCount = event.content.filter((block) => block.type === "image").length;
+      classifyText = textChars >= config.thresholdChars;
+      classifyImages = imageCount >= config.thresholdImages;
+      if (!classifyText && !classifyImages) return;
+    }
+
     // Without an explicit purpose, judge the output against the user's latest messages.
     const inputPurpose = typeof event.input.purpose === "string" ? event.input.purpose.trim() : "";
     const userMessages = inputPurpose ? [] : lastUserMessages(ctx, PURPOSE_MESSAGE_COUNT);
     const purpose = inputPurpose || userMessages.join("\n\n");
-    if (!purpose) return;
+    // Documents still need extraction without a purpose; they return unclassified below.
+    if (!purpose && outputType !== "document") return;
     const purposeSource = inputPurpose ? "tool_call" : "user_message";
     // Passed on as purposeMessageCount, so the classifier instructions name the actual number.
     const purposeMessageCount = userMessages.length;
@@ -137,6 +156,10 @@ export function registerOutputHook(pi: ExtensionAPI): void {
           isError: true,
         };
       }
+
+      classifyText = document.markdown.length >= config.thresholdChars;
+      classifyImages = document.figures.length >= config.thresholdImages;
+      if (!purpose || (!classifyText && !classifyImages)) return documentOutput(document);
 
       // The extracted document replaces the whole raw output: one item, no contentIndex.
       textBuffer.push({ text: document.markdown, markdown: true });
@@ -167,8 +190,9 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       toolArguments: event.input as ClassificationTaskContext["toolArguments"],
     };
 
+    // Sections are always split (figure context needs them), but only batched if text is classified.
     let batches: OutputBatch[] = [];
-    if (sections.length > 0) {
+    if (classifyText && sections.length > 0) {
       try {
         batches = batchSections(
           sections,
@@ -179,13 +203,12 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       } catch (error) {
         // Only when the base (purpose, tool arguments) leaves no room: pass the output through.
         ctx.ui.notify(`out-classify skipped this output: ${(error as Error).message}`, "warning");
-        // TODO: For documents, return the extracted content with figures (same as the rebuild).
-        return document ? { content: [{ type: "text", text: document.markdown }] } : undefined;
+        return document ? documentOutput(document) : undefined;
       }
     }
 
     // TODO: Classify text batches: one request per batch, one question per section (purpose, purposeSource).
-    // TODO: Classify figures and images with jevisual (session.client), with captions.
+    // TODO: Classify figures and images with jevisual (session.client), with captions, if classifyImages.
 
     // TODO: Return keep + uncertain in original order (content AND structuredContent).
     // On classifier failure, return the original output (for documents, the extracted content).
