@@ -7,6 +7,8 @@ export interface OutClassifyConfig {
   // Fewer images than this are not classified.
   thresholdImages: number;
   maxSectionChars: number;
+  // A Python with Docling to use instead of the venv out-classify installs itself.
+  pythonPath?: string;
 }
 
 const DEFAULT_THRESHOLD_CHARS = 8000;
@@ -27,6 +29,15 @@ function loadKeyInteger(
   }
 
   return value;
+}
+
+// Loads a non-empty path key; relative paths resolve from the agent directory, like the config itself.
+function loadKeyPath(config: Record<string, unknown>, key: string): string {
+  const value = config[key];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Out-classify ${key} must be a non-empty path.`);
+  }
+  return resolve(getAgentDir(), value.trim());
 }
 
 export async function loadConfig(): Promise<OutClassifyConfig> {
@@ -50,5 +61,6 @@ export async function loadConfig(): Promise<OutClassifyConfig> {
     thresholdImages: loadKeyInteger(config, "thresholdImages", DEFAULT_THRESHOLD_IMAGES, 1),
     // The splitters need at least 100 characters per section.
     maxSectionChars: loadKeyInteger(config, "maxSectionChars", DEFAULT_MAX_SECTION_CHARS, 100),
+    ...(config.pythonPath === undefined ? {} : { pythonPath: loadKeyPath(config, "pythonPath") }),
   };
 }

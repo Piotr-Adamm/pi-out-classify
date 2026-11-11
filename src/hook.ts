@@ -177,7 +177,10 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     if (outputType === "document") {
       // Native read returns raw PDF syntax, so never fall back to it.
       try {
-        document = await extractDocument(event.input.path as string);
+        document = await extractDocument(event.input.path as string, {
+          pythonPath: config.pythonPath,
+          onWarning: (message) => ctx.ui.notify(`out-classify: ${message}`, "warning"),
+        });
       } catch (error) {
         const text = `Could not extract this PDF: ${(error as Error).message}`;
         return { content: [{ type: "text", text }], structuredContent: text, isError: true };
