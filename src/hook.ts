@@ -86,10 +86,14 @@ function lastUserMessages(ctx: ExtensionContext, count: number): string[] {
 }
 
 // The extracted document as tool output, used whenever it is not (or cannot be) classified:
-// everything kept, figures after their linking section.
+// everything kept, figures after their linking section. structuredContent (read's output for scripts)
+// becomes the extracted Markdown instead of the raw PDF text.
 function documentOutput(document: ExtractedDocument, maxSectionChars: number) {
   const sections = splitTextBuffer([{ text: document.markdown, markdown: true }], maxSectionChars);
-  return { content: reconstruct({ sections, results: new Map(), images: [], document }) };
+  return {
+    content: reconstruct({ sections, results: new Map(), images: [], document }),
+    structuredContent: document.markdown,
+  };
 }
 
 export function registerOutputHook(pi: ExtensionAPI): void {
@@ -128,12 +132,9 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     if (!session) return;
     const { config } = session;
 
+    // Error results are filtered too (e.g. a long failing build log); isError stays as it is.
     const outputType = identifyOutputType(event);
     if (outputType === "empty") return;
-    if (event.isError) return;
-    // JSON for tools with an outputSchema cannot be filtered by text sections, and replacing
-    // content would drop it: such outputs are left alone.
-    if (event.structuredContent !== undefined) return;
 
     // Thresholds: a part below its threshold passes through unclassified; both below → nothing to do.
     // Documents are checked after extraction, because only the extracted text counts. Batching and
@@ -167,10 +168,8 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       try {
         document = await extractDocument(event.input.path as string);
       } catch (error) {
-        return {
-          content: [{ type: "text", text: `Could not extract this PDF: ${(error as Error).message}` }],
-          isError: true,
-        };
+        const text = `Could not extract this PDF: ${(error as Error).message}`;
+        return { content: [{ type: "text", text }], structuredContent: text, isError: true };
       }
 
       if (
@@ -282,7 +281,10 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     // Batched sections carry the IDs in results (split pieces have their own); unbatched text is kept.
     const classifiedSections = batches.length > 0 ? batches.flatMap((batch) => batch.sections) : sections;
     const readOffset = event.toolName === "read" && typeof event.input.offset === "number" ? event.input.offset : 1;
+    // Only content (what the agent sees) is filtered. structuredContent goes to scripts and is passed
+    // on unchanged; returning content without it would drop it.
     return {
+      structuredContent: event.structuredContent,
       content: [
         ...reconstruct({ sections: classifiedSections, results, document, images: imageBuffer, readOffset }),
         ...(readFooter ? [{ type: "text" as const, text: readFooter }] : []),
