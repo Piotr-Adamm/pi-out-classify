@@ -197,8 +197,8 @@ export interface ImageToClassify {
 }
 
 // All images of one tool result through jevisual, one choice question each. Results are in input
-// order. Skipped images (animated / multi-page) and a failed call become "unclassified"; a failure
-// also goes to onError. Cancellation (Esc) is rethrown, as for text.
+// order. Images jevisual leaves unclassified (animated / multi-page) and a failed call become
+// "unclassified"; a failure also goes to onError. Cancellation (Esc) is rethrown, as for text.
 export async function classifyImages(
   images: ImageToClassify[],
   context: ClassificationTaskContext,
@@ -222,7 +222,7 @@ export async function classifyImages(
     });
 
     return results.map((result): Classification => {
-      if (result.skipped) return "unclassified";
+      if (result.unclassified) return "unclassified";
       const answer = result.answers.relevance;
       // A missing or unknown answer keeps the image.
       return answer?.type === "choice" && CHOICES.has(answer.choice) ? answer.choice as Classification : "uncertain";
