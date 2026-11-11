@@ -18,6 +18,7 @@ import {
   type ImageToClassify,
 } from "./classifier.ts";
 import { loadConfig, type OutClassifyConfig } from "./config.ts";
+import { reconstruct } from "./reconstructor.ts";
 import { estimateBaseTokens, estimateSectionTokens } from "./estimator.ts";
 import { extractDocument, supportsDocumentExtraction, type ExtractedDocument } from "./extractor.ts";
 
@@ -81,10 +82,11 @@ function lastUserMessages(ctx: ExtensionContext, count: number): string[] {
   return messages;
 }
 
-// The extracted document as tool output, used whenever it is not (or cannot be) classified.
-// TODO: Include the figures (same as the rebuild).
-function documentOutput(document: ExtractedDocument) {
-  return { content: [{ type: "text" as const, text: document.markdown }] };
+// The extracted document as tool output, used whenever it is not (or cannot be) classified:
+// everything kept, figures after their linking section.
+function documentOutput(document: ExtractedDocument, maxSectionChars: number) {
+  const sections = splitTextBuffer([{ text: document.markdown, markdown: true }], maxSectionChars);
+  return { content: reconstruct({ sections, results: new Map(), images: [], document }) };
 }
 
 export function registerOutputHook(pi: ExtensionAPI): void {
@@ -170,7 +172,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       if (
         !purpose
         || (document.markdown.length < config.thresholdChars && document.figures.length < config.thresholdImages)
-      ) return documentOutput(document);
+      ) return documentOutput(document, config.maxSectionChars);
 
       // The extracted document replaces the whole raw output: one item, no contentIndex.
       textBuffer.push({ text: document.markdown, markdown: true });
@@ -215,7 +217,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       } catch (error) {
         // Only when the base (purpose, tool arguments) leaves no room: pass the output through.
         ctx.ui.notify(`out-classify skipped this output: ${(error as Error).message}`, "warning");
-        return document ? documentOutput(document) : undefined;
+        return document ? documentOutput(document, config.maxSectionChars) : undefined;
       }
     }
 
@@ -243,7 +245,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
         ),
       ]);
     } catch {
-      return document ? documentOutput(document) : undefined;
+      return document ? documentOutput(document, config.maxSectionChars) : undefined;
     }
 
     const unclassifiedSections = [...textResults.values()].filter((result) => result === "unclassified").length;
@@ -263,11 +265,14 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       );
     }
 
-    // One map for the rebuild: results.get(section.id), results.get(image.id), results.get(figure.id).
+    // One map for the reconstruction: results.get(section.id), results.get(image.id), results.get(figure.id).
     const results: ClassifierResults = new Map([...textResults, ...imageResults]);
 
-    // TODO: Return keep + uncertain + unclassified in original order (content AND structuredContent).
-    // If any section is unclassified, append one note for the agent:
-    // "[out-classify: N of M sections could not be classified (TypeSafe error) and are included unfiltered.]"
+    // Batched sections carry the IDs in results (split pieces have their own); unbatched text is kept.
+    const classifiedSections = batches.length > 0 ? batches.flatMap((batch) => batch.sections) : sections;
+    const readOffset = event.toolName === "read" && typeof event.input.offset === "number" ? event.input.offset : 1;
+    return {
+      content: reconstruct({ sections: classifiedSections, results, document, images: imageBuffer, readOffset }),
+    };
   });
 }
