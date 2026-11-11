@@ -268,6 +268,11 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     // One map for the reconstruction: results.get(section.id), results.get(image.id), results.get(figure.id).
     const results: ClassifierResults = new Map([...textResults, ...imageResults]);
 
+    // Nothing removed or unclassified: the original output passes through unchanged (documents still
+    // need their extracted content).
+    const changed = [...results.values()].some((result) => result === "discard" || result === "unclassified");
+    if (!changed) return document ? documentOutput(document, config.maxSectionChars) : undefined;
+
     // Batched sections carry the IDs in results (split pieces have their own); unbatched text is kept.
     const classifiedSections = batches.length > 0 ? batches.flatMap((batch) => batch.sections) : sections;
     const readOffset = event.toolName === "read" && typeof event.input.offset === "number" ? event.input.offset : 1;
