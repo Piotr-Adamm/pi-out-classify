@@ -132,6 +132,10 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     if (!session) return;
     const { config } = session;
 
+    // Only what the agent gets is filtered. Calls made by another tool (e.g. tools.read inside a
+    // codemode script) go to that tool, which needs the raw data; its own result is filtered.
+    if (event.parentToolCallId !== undefined) return;
+
     // Error results are filtered too (e.g. a long failing build log); isError stays as it is.
     const outputType = identifyOutputType(event);
     if (outputType === "empty") return;
@@ -282,9 +286,10 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     const classifiedSections = batches.length > 0 ? batches.flatMap((batch) => batch.sections) : sections;
     const readOffset = event.toolName === "read" && typeof event.input.offset === "number" ? event.input.offset : 1;
     // Only content (what the agent sees) is filtered. structuredContent goes to scripts and is passed
-    // on unchanged; returning content without it would drop it.
+    // on unchanged (documents: the extracted Markdown, not the raw file); returning content without
+    // it would drop it.
     return {
-      structuredContent: event.structuredContent,
+      structuredContent: document ? document.markdown : event.structuredContent,
       content: [
         ...reconstruct({ sections: classifiedSections, results, document, images: imageBuffer, readOffset }),
         ...(readFooter ? [{ type: "text" as const, text: readFooter }] : []),
