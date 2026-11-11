@@ -123,6 +123,9 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     const outputType = identifyOutputType(event);
     if (outputType === "empty") return;
     if (event.isError) return;
+    // JSON for tools with an outputSchema cannot be filtered by text sections, and replacing
+    // content would drop it: such outputs are left alone.
+    if (event.structuredContent !== undefined) return;
 
     // Thresholds: a part below its threshold passes through unclassified. Documents are
     // checked after extraction, because only the extracted text counts.
@@ -137,7 +140,10 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     }
 
     // Without an explicit purpose, judge the output against the user's latest messages.
-    const inputPurpose = typeof event.input.purpose === "string" ? event.input.purpose.trim() : "";
+    // purpose is the parameter added by out-classify's read override.
+    const inputPurpose = event.toolName === "read" && typeof event.input.purpose === "string"
+      ? event.input.purpose.trim()
+      : "";
     const userMessages = inputPurpose ? [] : lastUserMessages(ctx, PURPOSE_MESSAGE_COUNT);
     const purpose = inputPurpose || userMessages.join("\n\n");
     // Documents still need extraction without a purpose; they return unclassified below.
