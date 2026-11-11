@@ -27,8 +27,8 @@ export type OutputType = "text" | "images" | "document" | "mixed" | "empty";
 // Jev's context window if the catalog has no entry; a share of it is the token budget per request.
 const FALLBACK_CONTEXT_WINDOW = 64000;
 const BATCH_TOKEN_MARGIN = 0.8;
-// Without a purpose argument, the output is judged against this many of the latest user messages.
-const PURPOSE_MESSAGE_COUNT = 2;
+// Without a goal argument, the output is judged against this many of the latest user messages.
+const GOAL_MESSAGE_COUNT = 2;
 const MARKDOWN_PATH = /\.(md|markdown)$/i;
 // pi's read appends this when it truncates a file, e.g. "[Showing lines 1-2000 of 5000. Use offset=2001 to
 // continue.]". It is never classified, so the agent always learns where to continue.
@@ -149,18 +149,18 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       if (textChars < config.thresholdChars && imageCount < config.thresholdImages) return;
     }
 
-    // Without an explicit purpose, judge the output against the user's latest messages.
-    // purpose is the parameter added by out-classify's read override.
-    const inputPurpose = event.toolName === "read" && typeof event.input.purpose === "string"
-      ? event.input.purpose.trim()
+    // Without an explicit goal, judge the output against the user's latest messages.
+    // goal is the parameter added by out-classify's read override.
+    const inputGoal = event.toolName === "read" && typeof event.input.goal === "string"
+      ? event.input.goal.trim()
       : "";
-    const userMessages = inputPurpose ? [] : lastUserMessages(ctx, PURPOSE_MESSAGE_COUNT);
-    const purpose = inputPurpose || userMessages.join("\n\n");
-    // Documents still need extraction without a purpose; they return unclassified below.
-    if (!purpose && outputType !== "document") return;
-    const purposeSource = inputPurpose ? "tool_call" : "user_message";
-    // Passed on as purposeMessageCount, so the classifier instructions name the actual number.
-    const purposeMessageCount = userMessages.length;
+    const userMessages = inputGoal ? [] : lastUserMessages(ctx, GOAL_MESSAGE_COUNT);
+    const goal = inputGoal || userMessages.join("\n\n");
+    // Documents still need extraction without a goal; they return unclassified below.
+    if (!goal && outputType !== "document") return;
+    const goalSource = inputGoal ? "tool_call" : "user_message";
+    // Passed on as goalMessageCount, so the classifier instructions name the actual number.
+    const goalMessageCount = userMessages.length;
 
     const textBuffer: TextBuffer = [];
     const imageBuffer: ImageBuffer = [];
@@ -177,7 +177,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       }
 
       if (
-        !purpose
+        !goal
         || (document.markdown.length < config.thresholdChars && document.figures.length < config.thresholdImages)
       ) return documentOutput(document, config.maxSectionChars);
 
@@ -204,9 +204,9 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     if (sections.length === 0 && figures.length === 0 && imageBuffer.length === 0) return;
 
     const context: ClassificationTaskContext = {
-      purpose,
-      purposeSource,
-      ...(purposeSource === "user_message" ? { purposeMessageCount } : {}),
+      goal,
+      goalSource,
+      ...(goalSource === "user_message" ? { goalMessageCount } : {}),
       toolName: event.toolName,
       // Tool arguments arrive as parsed JSON.
       toolArguments: event.input as ClassificationTaskContext["toolArguments"],
@@ -224,14 +224,14 @@ export function registerOutputHook(pi: ExtensionAPI): void {
           (section) => estimateSectionTokens(section, context),
         );
       } catch (error) {
-        // Only when the base (purpose, tool arguments) leaves no room: pass the output through.
+        // Only when the base (goal, tool arguments) leaves no room: pass the output through.
         ctx.ui.notify(`out-classify skipped this output: ${(error as Error).message}`, "warning");
         return document ? documentOutput(document, config.maxSectionChars) : undefined;
       }
     }
 
     // Figures (documents) or non-document images, never both. Figures carry their caption, or without
-    // one the text of their linking section; other images are judged by the purpose only.
+    // one the text of their linking section; other images are judged by the goal only.
     const images: ImageToClassify[] = document
       ? figures.map((figure) => ({ id: figure.id, image: figure.image, caption: figure.caption || figure.context }))
       : imageBuffer.map((image) => ({ id: image.id, image: image.block }));

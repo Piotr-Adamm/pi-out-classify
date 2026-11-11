@@ -211,10 +211,10 @@ function fitSection(
 
   const half = Math.floor(section.text.length / 2);
   if (half < MIN_SECTION_CHARS) {
-    // Only reachable when the base (purpose, tool arguments) leaves almost no room.
+    // Only reachable when the base (goal, tool arguments) leaves almost no room.
     throw new Error(
       `Section ${section.id} still exceeds the batch budget at ${MIN_SECTION_CHARS} characters; ` +
-      "the request base (purpose, tool arguments) is too large.",
+      "the request base (goal, tool arguments) is too large.",
     );
   }
 
@@ -238,7 +238,7 @@ export function batchSections(
     throw new Error("baseTokens must be a non-negative integer.");
   }
   if (baseTokens >= maxBatchTokens) {
-    throw new Error("The request base (purpose, tool arguments) alone exceeds the batch budget.");
+    throw new Error("The request base (goal, tool arguments) alone exceeds the batch budget.");
   }
 
   const estimate = (section: OutputSection): number => {

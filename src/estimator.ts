@@ -8,7 +8,7 @@ function tokens(value: unknown): number {
   return countTokens(JSON.stringify(value), { disallowedSpecial: new Set() });
 }
 
-// Counted once per tool result: purpose, tool arguments, and the JSON around the sections.
+// Counted once per tool result: goal, tool arguments, and the JSON around the sections.
 export function estimateBaseTokens(context: ClassificationTaskContext): number {
   return tokens(requestBase(context));
 }
