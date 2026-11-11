@@ -18,7 +18,7 @@ export interface ReconstructionInput {
 
 const PAGE_BREAK = "<!-- page break -->";
 const PAGE_BREAK_AT_END = /<!-- page break -->$/;
-const NOTHING_RELEVANT = "[out-classify: nothing in this output was deemed relevant to the query.]";
+const NOTHING_RELEVANT = "[out-classify: nothing in this output was deemed relevant to the task.]";
 
 export function reconstruct(input: ReconstructionInput): Content[] {
   const { sections, results, document } = input;
@@ -111,7 +111,7 @@ function lineMarker(run: OutputSection[], sections: OutputSection[], readOffset:
   const from = firstLine(run[0]);
   const to = firstLine(last) + newlines(last.text.replace(/\n$/, ""));
   const lines = from === to ? `line ${from}` : `lines ${from}–${to}`;
-  return `[out-classify: ${lines} omitted, deemed not relevant to the query]`;
+  return `[out-classify: ${lines} omitted, deemed not relevant to the task]`;
 }
 
 // "pages 3–5 (## A, ## B)": page = 1 + page breaks before; headings = first heading of each section.
@@ -123,7 +123,7 @@ function pageMarker(run: OutputSection[], markdown: string): string {
   const pages = from === to ? `page ${from}` : `pages ${from}–${to}`;
   const headings = run.map((section) => section.text.match(/^#{1,6} .*/m)?.[0]).filter(Boolean);
   const where = headings.length > 0 ? `${pages} (${headings.join(", ")})` : pages;
-  return `[out-classify: text omitted on ${where}, deemed not relevant to the query]`;
+  return `[out-classify: text omitted on ${where}, deemed not relevant to the task]`;
 }
 
 // At most one note per kind: unclassified parts are included unfiltered.
