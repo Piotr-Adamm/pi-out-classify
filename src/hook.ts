@@ -32,8 +32,9 @@ const BATCH_TOKEN_MARGIN = 0.8;
 const GOAL_MESSAGE_COUNT = 2;
 const MARKDOWN_PATH = /\.(md|markdown)$/i;
 // pi's read appends this when it truncates a file, e.g. "[Showing lines 1-2000 of 5000. Use offset=2001 to
-// continue.]". It is never classified, so the agent always learns where to continue.
-const READ_FOOTER = /\n\n\[[^\]\n]*Use offset=\d+ to continue\.\]$/;
+// continue.]". It is never classified, so the agent always learns where to continue. Checked for every
+// tool, not only read: a codemode script that returns a read's text ends with the same footer.
+const READ_FOOTER = /\n\n\[[^\]\n]*Use offset=\d+ to continue\.\]\s*$/;
 
 // Everything resolved once per session_start; undefined means out-classify is off.
 interface SessionState {
@@ -195,8 +196,8 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       const markdown = typeof path === "string" && MARKDOWN_PATH.test(path);
       for (const [contentIndex, block] of event.content.entries()) {
         if (block.type === "text") {
-          const footer = event.toolName === "read" ? block.text.match(READ_FOOTER)?.[0] ?? "" : "";
-          readFooter ||= footer.trimStart();
+          const footer = block.text.match(READ_FOOTER)?.[0] ?? "";
+          readFooter ||= footer.trim();
           textBuffer.push({ text: block.text.slice(0, block.text.length - footer.length), markdown, contentIndex });
         } else if (block.type === "image") {
           imageBuffer.push({ id: `image_${contentIndex}`, contentIndex, block });
