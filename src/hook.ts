@@ -1,9 +1,18 @@
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import type { TypeSafeClient } from "@typesafe-ai/sdk";
 import { createClient } from "../../jevisual/src/api.ts";
-import { addFigureContext, splitIntoSections, splitMarkdownIntoSections, type FigureWithContext, type OutputSection } from "./batcher.ts";
+import {
+  addFigureContext,
+  batchSections,
+  splitTextBuffer,
+  type FigureWithContext,
+  type OutputBatch,
+  type TextBuffer,
+} from "./batcher.ts";
+import type { ClassificationTaskContext } from "./classifier.ts";
 import { loadConfig, type OutClassifyConfig } from "./config.ts";
+import { estimateBaseTokens, estimateSectionTokens } from "./estimator.ts";
 import { extractDocument, supportsDocumentExtraction, type ExtractedDocument } from "./extractor.ts";
 
 export type OutputType = "text" | "images" | "document" | "mixed" | "empty";
@@ -13,6 +22,7 @@ const FALLBACK_CONTEXT_WINDOW = 64000;
 const BATCH_TOKEN_MARGIN = 0.8;
 // Without a purpose argument, the output is judged against this many of the latest user messages.
 const PURPOSE_MESSAGE_COUNT = 2;
+const MARKDOWN_PATH = /\.(md|markdown)$/i;
 
 // Everything resolved once per session_start; undefined means out-classify is off.
 interface SessionState {
@@ -21,10 +31,14 @@ interface SessionState {
   maxBatchTokens: number;
 }
 
-interface BufferedBlock<T> {
+// One image block of the tool output, kept unchanged for the rebuild. Counterpart of TextItem.
+interface ImageItem {
   contentIndex: number;
-  block: T;
+  block: ImageContent;
 }
+
+// Non-document images, in output order. Counterpart of TextBuffer.
+type ImageBuffer = ImageItem[];
 
 export function identifyOutputType(event: ToolResultEvent): OutputType {
   const path = event.toolName === "read" ? event.input.path : undefined;
@@ -109,14 +123,12 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     // Passed on as purposeMessageCount, so the classifier instructions name the actual number.
     const purposeMessageCount = userMessages.length;
 
-    const text: BufferedBlock<TextContent>[] = [];
-    const images: BufferedBlock<ImageContent>[] = []; // Non-document images only.
-    let sections: OutputSection[] = [];
-    let figures: FigureWithContext[] = [];
+    const textBuffer: TextBuffer = [];
+    const imageBuffer: ImageBuffer = [];
+    let document: ExtractedDocument | undefined;
 
     if (outputType === "document") {
       // Native read returns raw PDF syntax, so never fall back to it.
-      let document: ExtractedDocument;
       try {
         document = await extractDocument(event.input.path as string);
       } catch (error) {
@@ -126,28 +138,51 @@ export function registerOutputHook(pi: ExtensionAPI): void {
         };
       }
 
-      // The extracted document replaces the whole raw output, so it is split directly.
-      sections = splitMarkdownIntoSections(document.markdown, config.maxSectionChars);
-      figures = addFigureContext(document.figures, sections);
+      // The extracted document replaces the whole raw output: one item, no contentIndex.
+      textBuffer.push({ text: document.markdown, markdown: true });
     } else {
       // Pure and mixed outputs feed the same buffers without copying or reordering blocks.
+      const path = event.toolName === "read" ? event.input.path : undefined;
+      const markdown = typeof path === "string" && MARKDOWN_PATH.test(path);
       for (const [contentIndex, block] of event.content.entries()) {
         if (block.type === "text") {
-          text.push({ contentIndex, block });
+          textBuffer.push({ text: block.text, markdown, contentIndex });
         } else if (block.type === "image") {
-          images.push({ contentIndex, block });
+          imageBuffer.push({ contentIndex, block });
         }
       }
     }
 
-    // TODO: Use splitMarkdownIntoSections for .md reads.
-    for (const { contentIndex, block } of text) {
-      sections.push(...splitIntoSections(block.text, config.maxSectionChars, contentIndex));
+    const sections = splitTextBuffer(textBuffer, config.maxSectionChars);
+    const figures: FigureWithContext[] = document ? addFigureContext(document.figures, sections) : [];
+
+    if (sections.length === 0 && figures.length === 0 && imageBuffer.length === 0) return;
+
+    const context: ClassificationTaskContext = {
+      purpose,
+      purposeSource,
+      ...(purposeSource === "user_message" ? { purposeMessageCount } : {}),
+      toolName: event.toolName,
+      // Tool arguments arrive as parsed JSON.
+      toolArguments: event.input as ClassificationTaskContext["toolArguments"],
+    };
+
+    let batches: OutputBatch[] = [];
+    if (sections.length > 0) {
+      try {
+        batches = batchSections(
+          sections,
+          session.maxBatchTokens,
+          estimateBaseTokens(context),
+          (section) => estimateSectionTokens(section, context),
+        );
+      } catch (error) {
+        // Only when the base (purpose, tool arguments) leaves no room: pass the output through.
+        ctx.ui.notify(`out-classify skipped this output: ${(error as Error).message}`, "warning");
+        // TODO: For documents, return the extracted content with figures (same as the rebuild).
+        return document ? { content: [{ type: "text", text: document.markdown }] } : undefined;
+      }
     }
-
-    if (sections.length === 0 && figures.length === 0 && images.length === 0) return;
-
-    // TODO: Batch sections with batchSections once the token estimate exists.
 
     // TODO: Classify text batches: one request per batch, one question per section (purpose, purposeSource).
     // TODO: Classify figures and images with jevisual (session.client), with captions.

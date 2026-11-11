@@ -2,19 +2,38 @@ import type { Figure } from "./extractor.ts";
 
 export interface OutputSection {
   id: string;
+  // Offsets into all text items joined in order (see splitTextBuffer), so IDs are unique.
   start: number;
   end: number;
   text: string;
+  // Position of the source block in event.content, for the rebuild. Unset for documents,
+  // whose extracted text replaces the whole output.
+  contentIndex?: number;
 }
+
+// One piece of text in the buffer: a text block of the tool output, or an extracted document.
+export interface TextItem {
+  text: string;
+  // Documents and .md reads use the Markdown splitter, everything else the line splitter.
+  markdown: boolean;
+  contentIndex?: number;
+}
+
+// Everything the hook collects for text classification, in output order. Filled in the hook's
+// tool_result: one item per text block, or a single item for an extracted document.
+export type TextBuffer = TextItem[];
 
 export interface OutputBatch {
   sections: OutputSection[];
   estimatedTokens: number;
 }
 
+// Smallest section size, for the splitters and for re-splitting oversized sections.
+const MIN_SECTION_CHARS = 100;
+
 function checkSplitArguments(maxSectionChars: number, startOffset: number): void {
-  if (!Number.isSafeInteger(maxSectionChars) || maxSectionChars < 100) {
-    throw new Error("maxSectionChars must be an integer of at least 100.");
+  if (!Number.isSafeInteger(maxSectionChars) || maxSectionChars < MIN_SECTION_CHARS) {
+    throw new Error(`maxSectionChars must be an integer of at least ${MIN_SECTION_CHARS}.`);
   }
   if (!Number.isSafeInteger(startOffset) || startOffset < 0) {
     throw new Error("startOffset must be a non-negative integer.");
@@ -139,6 +158,26 @@ export function splitMarkdownIntoSections(
   });
 }
 
+// Splits every item with its splitter and keeps a running offset across items,
+// so sections of different blocks never share offsets or IDs.
+export function splitTextBuffer(buffer: TextBuffer, maxSectionChars: number): OutputSection[] {
+  const sections: OutputSection[] = [];
+  let offset = 0;
+
+  for (const item of buffer) {
+    const split = item.markdown
+      ? splitMarkdownIntoSections(item.text, maxSectionChars, offset)
+      : splitIntoSections(item.text, maxSectionChars, offset);
+
+    for (const section of split) {
+      sections.push(item.contentIndex === undefined ? section : { ...section, contentIndex: item.contentIndex });
+    }
+    offset += item.text.length;
+  }
+
+  return sections;
+}
+
 export interface FigureWithContext extends Figure {
   // Text of the section that links to the figure; only set when there is no caption.
   context?: string;
@@ -154,46 +193,77 @@ export function addFigureContext(figures: Figure[], sections: OutputSection[]): 
   }));
 }
 
-// The estimator must include task context, tool arguments, questions, and overhead.
+interface EstimatedSection {
+  section: OutputSection;
+  tokens: number;
+}
+
+// Only for a section too big for even an empty batch: halve it until every piece fits.
+// All pieces are kept, in order, in place of the original. They keep absolute offsets
+// (unique IDs) and any extra fields of the original section.
+function fitSection(
+  section: OutputSection,
+  maxSectionTokens: number,
+  estimate: (section: OutputSection) => number,
+): EstimatedSection[] {
+  const tokens = estimate(section);
+  if (tokens <= maxSectionTokens) return [{ section, tokens }];
+
+  const half = Math.floor(section.text.length / 2);
+  if (half < MIN_SECTION_CHARS) {
+    // Only reachable when the base (purpose, tool arguments) leaves almost no room.
+    throw new Error(
+      `Section ${section.id} still exceeds the batch budget at ${MIN_SECTION_CHARS} characters; ` +
+      "the request base (purpose, tool arguments) is too large.",
+    );
+  }
+
+  return splitIntoSections(section.text, half, section.start)
+    .flatMap((piece) => fitSection({ ...section, ...piece }, maxSectionTokens, estimate));
+}
+
+// A batch costs baseTokens (sent with every request) plus the tokens of each of its sections.
+// Each section is estimated once; the batch total is a running sum. Sections are never cut to
+// fill a batch: if the next one does not fit, the batch is closed and the next one starts.
 export function batchSections(
   sections: OutputSection[],
   maxBatchTokens: number,
-  estimateRequestTokens: (sections: OutputSection[]) => number,
+  baseTokens: number,
+  estimateSectionTokens: (section: OutputSection) => number,
 ): OutputBatch[] {
   if (!Number.isSafeInteger(maxBatchTokens) || maxBatchTokens <= 0) {
     throw new Error("maxBatchTokens must be a positive integer.");
   }
+  if (!Number.isSafeInteger(baseTokens) || baseTokens < 0) {
+    throw new Error("baseTokens must be a non-negative integer.");
+  }
+  if (baseTokens >= maxBatchTokens) {
+    throw new Error("The request base (purpose, tool arguments) alone exceeds the batch budget.");
+  }
 
-  const estimate = (items: OutputSection[]): number => {
-    const tokens = estimateRequestTokens(items);
+  const estimate = (section: OutputSection): number => {
+    const tokens = estimateSectionTokens(section);
     if (!Number.isSafeInteger(tokens) || tokens < 0) {
-      throw new Error("The request token estimate must be a non-negative integer.");
+      throw new Error("The section token estimate must be a non-negative integer.");
     }
     return tokens;
   };
 
   const batches: OutputBatch[] = [];
   let pending: OutputSection[] = [];
-  let pendingTokens = 0;
+  let pendingTokens = baseTokens;
 
-  for (const section of sections) {
-    const singleTokens = estimate([section]);
-    if (singleTokens > maxBatchTokens) {
-      throw new Error(`Section ${section.id} exceeds the batch budget; split it further.`);
-    }
+  for (const original of sections) {
+    for (const { section, tokens } of fitSection(original, maxBatchTokens - baseTokens, estimate)) {
+      // Close the batch if this section would push it over the budget.
+      if (pending.length > 0 && pendingTokens + tokens > maxBatchTokens) {
+        batches.push({ sections: pending, estimatedTokens: pendingTokens });
+        pending = [];
+        pendingTokens = baseTokens;
+      }
 
-    const candidate = [...pending, section];
-    const candidateTokens = pending.length === 0
-      ? singleTokens
-      : estimate(candidate);
-
-    if (candidateTokens > maxBatchTokens) {
-      batches.push({ sections: pending, estimatedTokens: pendingTokens });
-      pending = [section];
-      pendingTokens = singleTokens;
-    } else {
-      pending = candidate;
-      pendingTokens = candidateTokens;
+      pending.push(section);
+      pendingTokens += tokens;
     }
   }
 
