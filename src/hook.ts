@@ -127,16 +127,13 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     // content would drop it: such outputs are left alone.
     if (event.structuredContent !== undefined) return;
 
-    // Thresholds: a part below its threshold passes through unclassified. Documents are
-    // checked after extraction, because only the extracted text counts.
-    let classifyText = true;
-    let classifyImages = true;
+    // Thresholds: a part below its threshold passes through unclassified; both below → nothing to do.
+    // Documents are checked after extraction, because only the extracted text counts. Batching and
+    // image classification check their threshold again on the buffers.
     if (outputType !== "document") {
       const textChars = event.content.reduce((sum, block) => block.type === "text" ? sum + block.text.length : sum, 0);
       const imageCount = event.content.filter((block) => block.type === "image").length;
-      classifyText = textChars >= config.thresholdChars;
-      classifyImages = imageCount >= config.thresholdImages;
-      if (!classifyText && !classifyImages) return;
+      if (textChars < config.thresholdChars && imageCount < config.thresholdImages) return;
     }
 
     // Without an explicit purpose, judge the output against the user's latest messages.
@@ -167,9 +164,10 @@ export function registerOutputHook(pi: ExtensionAPI): void {
         };
       }
 
-      classifyText = document.markdown.length >= config.thresholdChars;
-      classifyImages = document.figures.length >= config.thresholdImages;
-      if (!purpose || (!classifyText && !classifyImages)) return documentOutput(document);
+      if (
+        !purpose
+        || (document.markdown.length < config.thresholdChars && document.figures.length < config.thresholdImages)
+      ) return documentOutput(document);
 
       // The extracted document replaces the whole raw output: one item, no contentIndex.
       textBuffer.push({ text: document.markdown, markdown: true });
@@ -202,7 +200,8 @@ export function registerOutputHook(pi: ExtensionAPI): void {
 
     // Sections are always split (figure context needs them), but only batched if text is classified.
     let batches: OutputBatch[] = [];
-    if (classifyText && sections.length > 0) {
+    const textChars = textBuffer.reduce((sum, item) => sum + item.text.length, 0);
+    if (textChars >= config.thresholdChars && sections.length > 0) {
       try {
         batches = batchSections(
           sections,
@@ -242,7 +241,8 @@ export function registerOutputHook(pi: ExtensionAPI): void {
         );
       }
     }
-    // TODO: Classify figures and images with jevisual (session.client), with captions, if classifyImages.
+    // TODO: Classify figures and images with jevisual (session.client), with captions, if their count
+    // reaches config.thresholdImages.
 
     // TODO: Return keep + uncertain + unclassified in original order (content AND structuredContent).
     // If any section is unclassified, append one note for the agent:
