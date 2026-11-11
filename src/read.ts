@@ -8,10 +8,14 @@ export function registerReadOverride(pi: ExtensionAPI): void {
     ...nativeRead,
     description:
       nativeRead.description +
-      " Optionally supply purpose to explain what this read should establish. Reads without a purpose bypass output classification.",
+      " PDFs are returned as extracted Markdown with their figures." +
+      " Optionally supply purpose to explain what this read should establish. Parts of large outputs that are" +
+      " not relevant to the purpose (or, without one, to the latest user messages) may be omitted and marked" +
+      " with a note such as \"[out-classify: lines 120–184 omitted, …]\".",
     promptGuidelines: [
       ...(nativeRead.promptGuidelines ?? []),
-      "Provide purpose describing the immediate information needed from a read. Omit it when raw, unfiltered output is required.",
+      "Provide purpose describing the immediate information needed from a read.",
+      "If an omitted part is needed after all, read it again with offset/limit for the omitted lines.",
     ],
     parameters: Type.Object({
       ...nativeRead.parameters.properties,
