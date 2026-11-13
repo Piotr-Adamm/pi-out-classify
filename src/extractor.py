@@ -5,6 +5,7 @@
 # Docling is imported only where it is needed, so `version` stays fast.
 import argparse
 import json
+import re
 import shutil
 import sys
 from contextlib import redirect_stdout
@@ -13,6 +14,8 @@ from pathlib import Path
 
 # Written last into the models directory, holding the Docling version the models were downloaded with.
 INSTALLED_MARKER = ".installed"
+# Placeholder text for formula n, replaced by its figure link after the Markdown export.
+FORMULA_TOKEN = "OUTCLASSIFYFORMULA"
 
 
 def docling_version() -> str:
@@ -52,11 +55,13 @@ def extract(path: Path, image_dir: Path, models_dir: Path) -> dict:
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
-    from docling_core.types.doc import ImageRefMode, PictureItem
+    from docling_core.types.doc import DocItemLabel, ImageRefMode, PictureItem
 
     pipeline_options = PdfPipelineOptions(artifacts_path=models_dir)
     pipeline_options.do_ocr = False  # Native-text PDFs first; enable OCR when needed.
     pipeline_options.generate_picture_images = True
+    # Formulas are cropped from the page images.
+    pipeline_options.generate_page_images = True
     pipeline_options.images_scale = 2.0
 
     converter = DocumentConverter(
@@ -68,7 +73,32 @@ def extract(path: Path, image_dir: Path, models_dir: Path) -> dict:
     document = converter.convert(path).document
 
     figures = []
+    formula_count = 0
+    unextracted_formulas = {}  # formula number -> page, for formulas without an image
     for item, _level in document.iterate_items():
+        if item.label == DocItemLabel.FORMULA:
+            # Docling would write <!-- formula-not-decoded --> (no formula model) or the PDF's text layer,
+            # which flattens exponents and fractions (s2 for s^2). Instead, each formula becomes an image
+            # linked like a figure; the token marks its place in the Markdown.
+            formula_count += 1
+            item.text = f"{FORMULA_TOKEN}{formula_count}"
+            page = item.prov[0].page_no if item.prov else None
+            image = item.get_image(document)
+            if image is None:
+                unextracted_formulas[formula_count] = page
+                continue
+            formula_id = f"formula-{formula_count}"
+            formula_path = image_dir / f"{formula_id}.png"
+            image.save(formula_path)
+            figures.append({
+                "id": formula_id,
+                "kind": "formula",
+                "path": str(formula_path),
+                "caption": "",
+                "page": page,
+            })
+            continue
+
         if not isinstance(item, PictureItem) or item.image is None:
             continue
         image = item.get_image(document)
@@ -82,6 +112,7 @@ def extract(path: Path, image_dir: Path, models_dir: Path) -> dict:
         item.image.uri = Path(figure_id)
         figures.append({
             "id": figure_id,
+            "kind": "figure",
             "path": str(figure_path),
             "caption": item.caption_text(document),
             "page": item.prov[0].page_no if item.prov else None,
@@ -91,6 +122,15 @@ def extract(path: Path, image_dir: Path, models_dir: Path) -> dict:
         image_mode=ImageRefMode.REFERENCED,
         page_break_placeholder="<!-- page break -->",
     )
+
+    def formula_link(match: re.Match) -> str:
+        number = int(match.group(1))
+        if number in unextracted_formulas:
+            page = unextracted_formulas[number]
+            return f"[formula on page {page} could not be extracted]" if page else "[formula could not be extracted]"
+        return f"![Formula](formula-{number})"
+
+    markdown = re.sub(rf"\$\${FORMULA_TOKEN}(\d+)\$\$", formula_link, markdown)
     return {"markdown": markdown, "figures": figures}
 
 

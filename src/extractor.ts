@@ -25,7 +25,9 @@ const STDERR_TAIL_LINES = 5;
 const documentExtensions = new Set([".pdf"]);
 
 export interface Figure {
-  id: string; // Matches the ![Image](id) reference in the Markdown.
+  id: string; // Matches the ![Image](id) or ![Formula](id) reference in the Markdown.
+  // "formula": a cropped formula (formula-<n>), transcribed to LaTeX if a formula model is configured.
+  kind: "figure" | "formula";
   caption: string;
   page: number | null;
   image: ImageContent;
@@ -167,7 +169,7 @@ export async function extractDocument(path: string, options: ExtractorOptions = 
     const output = await run(python, [scriptPath, "extract", resolve(path), imageDir, modelsDir]);
     const { markdown, figures } = JSON.parse(output) as {
       markdown: string;
-      figures: { id: string; path: string; caption: string; page: number | null }[];
+      figures: { id: string; kind: Figure["kind"]; path: string; caption: string; page: number | null }[];
     };
 
     // Load the images into memory so the directory can be removed right away.

@@ -14,6 +14,8 @@ export interface ReconstructionInput {
   document?: { markdown: string; figures: Figure[] };
   images: ImageItem[]; // Non-documents only.
   readOffset?: number; // First file line of the output (read's offset); default 1.
+  // Formula ID → Typst math for transcribed formulas; the others are returned as images, like figures.
+  formulaText?: Map<string, string>;
 }
 
 const PAGE_BREAK = "<!-- page break -->";
@@ -29,23 +31,37 @@ export function reconstruct(input: ReconstructionInput): Content[] {
   if (nothingKept) return [{ type: "text", text: NOTHING_RELEVANT }];
 
   const content = document ?
-    reconstructDocument(sections, document.figures, document.markdown, kept) :
+    reconstructDocument(sections, document.figures, document.markdown, kept, input.formulaText ?? new Map()) :
     reconstructOutput(sections, input.images, input.readOffset ?? 1, kept);
   return [...content, ...agentNotes(sections, imageIds, results)];
 }
 
+// Replaces the links of transcribed formulas with their Typst math, as a display equation.
+export function inlineFormulas(text: string, formulaText: Map<string, string>): string {
+  return text.replace(/!\[Formula\]\((formula-\d+)\)/g, (link, id: string) => {
+    const typst = formulaText.get(id);
+    return typst === undefined ? link : `$ ${typst} $`;
+  });
+}
+
 // Sections in order; each followed by the kept figures it links to, even if the section is removed.
+// Transcribed formulas stand in place of their link instead; in a removed section, they follow it.
 function reconstructDocument(
   sections: OutputSection[],
   figures: Figure[],
   markdown: string,
   kept: (id: string) => boolean,
+  formulaText: Map<string, string>,
 ): Content[] {
   const pieces: Piece[] = [];
   for (const section of sections) {
-    pieces.push(kept(section.id) ? section.text : section);
+    const sectionKept = kept(section.id);
+    pieces.push(sectionKept ? inlineFormulas(section.text, formulaText) : section);
     for (const figure of figures) {
-      if (section.text.includes(`](${figure.id})`) && kept(figure.id)) pieces.push(figure.image);
+      if (!section.text.includes(`](${figure.id})`) || !kept(figure.id)) continue;
+      const typst = formulaText.get(figure.id);
+      if (typst === undefined) pieces.push(figure.image);
+      else if (!sectionKept) pieces.push(`$ ${typst} $\n`);
     }
   }
   return merge(pieces, (run) => pageMarker(run, markdown));

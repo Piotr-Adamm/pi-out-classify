@@ -1,4 +1,4 @@
-import type { ImageContent } from "@earendil-works/pi-ai";
+import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import type { TypeSafeClient } from "@typesafe-ai/sdk";
 import { createClient } from "pi-jevisual/api";
@@ -19,7 +19,8 @@ import {
 } from "./classifier.ts";
 import { CODEMODE_TOOL_NAME, parseCodemodeGoal } from "./codemode.ts";
 import { loadConfig, type OutClassifyConfig } from "./config.ts";
-import { reconstruct } from "./reconstructor.ts";
+import { transcribeFormulas } from "./formulas.ts";
+import { inlineFormulas, reconstruct } from "./reconstructor.ts";
 import { estimateBaseTokens, estimateSectionTokens } from "./estimator.ts";
 import { extractDocument, supportsDocumentExtraction, type ExtractedDocument } from "./extractor.ts";
 
@@ -41,6 +42,8 @@ interface SessionState {
   config: OutClassifyConfig;
   client: TypeSafeClient;
   maxBatchTokens: number;
+  // The configured formulaModel, if it exists and takes images; without it, formulas stay images.
+  formulaModel?: Model<Api>;
 }
 
 // One image block of the tool output, kept unchanged for the rebuild. Counterpart of TextItem.
@@ -90,11 +93,11 @@ function lastUserMessages(ctx: ExtensionContext, count: number): string[] {
 // The extracted document as tool output, used whenever it is not (or cannot be) classified:
 // everything kept, figures after their linking section. structuredContent (read's output for scripts)
 // becomes the extracted Markdown instead of the raw PDF text.
-function documentOutput(document: ExtractedDocument, maxSectionChars: number) {
+function documentOutput(document: ExtractedDocument, maxSectionChars: number, formulaText: Map<string, string>) {
   const sections = splitTextBuffer([{ text: document.markdown, markdown: true }], maxSectionChars);
   return {
-    content: reconstruct({ sections, results: new Map(), images: [], document }),
-    structuredContent: document.markdown,
+    content: reconstruct({ sections, results: new Map(), images: [], document, formulaText }),
+    structuredContent: inlineFormulas(document.markdown, formulaText),
   };
 }
 
@@ -104,6 +107,25 @@ function toolCallGoal(event: ToolResultEvent): string {
   if (event.toolName === "read" && typeof event.input.goal === "string") return event.input.goal.trim();
   if (event.toolName.toLowerCase() === CODEMODE_TOOL_NAME) return parseCodemodeGoal(event.input.code);
   return "";
+}
+
+// The configured formula model, or undefined (with a warning) if it is unknown or cannot take images.
+function resolveFormulaModel(config: OutClassifyConfig, ctx: ExtensionContext): Model<Api> | undefined {
+  if (!config.formulaModel) return undefined;
+  const { provider, id } = config.formulaModel;
+  const model = ctx.modelRegistry.find(provider, id);
+  const problem = !model
+    ? "is not a known model"
+    : !model.input.includes("image")
+      ? "does not take images"
+      : !ctx.modelRegistry.hasConfiguredAuth(model)
+        ? "has no login or key"
+        : undefined;
+  if (problem) {
+    ctx.ui.notify(`out-classify: formulaModel ${provider}/${id} ${problem}; formulas are returned as images.`, "warning");
+    return undefined;
+  }
+  return model;
 }
 
 export function registerOutputHook(pi: ExtensionAPI): void {
@@ -135,8 +157,45 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       config,
       client: createClient(apiKey),
       maxBatchTokens: Math.floor(contextWindow * BATCH_TOKEN_MARGIN),
+      formulaModel: resolveFormulaModel(config, ctx),
     };
   });
+
+  // Typst math for the formulas of `document` that are kept (not discarded in `results`), if a formula
+  // model is configured. Formulas it cannot transcribe are returned as images.
+  const transcribeKeptFormulas = async (
+    document: ExtractedDocument,
+    results: ClassifierResults,
+    ctx: ExtensionContext,
+  ): Promise<Map<string, string>> => {
+    const model = session?.formulaModel;
+    const formulas = document.figures.filter((figure) => figure.kind === "formula" && results.get(figure.id) !== "discard");
+    if (!session || !model || formulas.length === 0) return new Map();
+
+    let error: unknown;
+    let formulaText: Map<string, string>;
+    try {
+      formulaText = await transcribeFormulas(formulas, {
+        registry: ctx.modelRegistry,
+        model,
+        cacheDir: session.config.cacheDir,
+        cacheMaxAgeDays: session.config.cacheMaxAgeDays,
+        signal: ctx.signal,
+        onError: (cause) => { error ??= cause; },
+      });
+    } catch {
+      // Cancelled (Esc): the formulas stay images.
+      return new Map();
+    }
+    if (formulaText.size < formulas.length) {
+      ctx.ui.notify(
+        `out-classify: ${formulas.length - formulaText.size} of ${formulas.length} formulas could not be transcribed ` +
+        `and are included as images${error ? ` (${(error as Error).message})` : ""}.`,
+        "warning",
+      );
+    }
+    return formulaText;
+  };
 
   pi.on("tool_result", async (event, ctx) => {
     if (!session) return;
@@ -189,7 +248,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       if (
         !goal
         || (document.markdown.length < config.thresholdChars && document.figures.length < config.thresholdImages)
-      ) return documentOutput(document, config.maxSectionChars);
+      ) return documentOutput(document, config.maxSectionChars, await transcribeKeptFormulas(document, new Map(), ctx));
 
       // The extracted document replaces the whole raw output: one item, no contentIndex.
       textBuffer.push({ text: document.markdown, markdown: true });
@@ -236,7 +295,9 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       } catch (error) {
         // Only when the base (goal, tool arguments) leaves no room: pass the output through.
         ctx.ui.notify(`out-classify skipped this output: ${(error as Error).message}`, "warning");
-        return document ? documentOutput(document, config.maxSectionChars) : undefined;
+        return document
+          ? documentOutput(document, config.maxSectionChars, await transcribeKeptFormulas(document, new Map(), ctx))
+          : undefined;
       }
     }
 
@@ -264,7 +325,8 @@ export function registerOutputHook(pi: ExtensionAPI): void {
         ),
       ]);
     } catch {
-      return document ? documentOutput(document, config.maxSectionChars) : undefined;
+      // Cancelled (Esc): no further model calls, formulas stay images.
+      return document ? documentOutput(document, config.maxSectionChars, new Map()) : undefined;
     }
 
     const unclassifiedSections = [...textResults.values()].filter((result) => result === "unclassified").length;
@@ -290,7 +352,8 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     // Nothing removed or unclassified: the original output passes through unchanged (documents still
     // need their extracted content).
     const changed = [...results.values()].some((result) => result === "discard" || result === "unclassified");
-    if (!changed) return document ? documentOutput(document, config.maxSectionChars) : undefined;
+    const formulaText = document ? await transcribeKeptFormulas(document, results, ctx) : new Map<string, string>();
+    if (!changed) return document ? documentOutput(document, config.maxSectionChars, formulaText) : undefined;
 
     // Batched sections carry the IDs in results (split pieces have their own); unbatched text is kept.
     const classifiedSections = batches.length > 0 ? batches.flatMap((batch) => batch.sections) : sections;
@@ -299,9 +362,9 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     // on unchanged (documents: the extracted Markdown, not the raw file); returning content without
     // it would drop it.
     return {
-      structuredContent: document ? document.markdown : event.structuredContent,
+      structuredContent: document ? inlineFormulas(document.markdown, formulaText) : event.structuredContent,
       content: [
-        ...reconstruct({ sections: classifiedSections, results, document, images: imageBuffer, readOffset }),
+        ...reconstruct({ sections: classifiedSections, results, document, images: imageBuffer, readOffset, formulaText }),
         ...(readFooter ? [{ type: "text" as const, text: readFooter }] : []),
       ],
     };
