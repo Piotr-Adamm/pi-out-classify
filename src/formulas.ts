@@ -3,11 +3,11 @@
  * Transcribes cropped PDF formulas to Typst math with a vision model, cached per formula image.
  */
 
-import type { Api, ImageContent, Model, TextContent } from '@earendil-works/pi-ai'
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { createHash } from 'node:crypto'
 import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import type { Api, ImageContent, Model, TextContent } from '@earendil-works/pi-ai'
+import type { ExtensionContext } from '@earendil-works/pi-coding-agent'
 import type { Figure } from './extractor.ts'
 
 /**
