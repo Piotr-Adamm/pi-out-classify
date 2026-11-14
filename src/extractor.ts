@@ -26,7 +26,7 @@ const documentExtensions = new Set(['.pdf'])
 
 export interface Figure {
   id: string // Matches the ![Image](id) or ![Formula](id) reference in the Markdown.
-  // "formula": a cropped formula (formula-<n>), transcribed to LaTeX if a formula model is configured.
+  // "formula": a cropped formula (formula-<n>), transcribed to Typst math if a formula model is configured.
   kind: 'figure' | 'formula'
   caption: string
   page: number | null

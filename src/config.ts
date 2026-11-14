@@ -10,7 +10,7 @@ export interface OutClassifyConfig {
   maxSectionChars: number
   // A Python with Docling to use instead of the venv out-classify installs itself.
   pythonPath?: string
-  // "provider/model" of a vision model that transcribes kept PDF formulas to LaTeX. Without it,
+  // "provider/model" of a vision model that transcribes kept PDF formulas to Typst math. Without it,
   // formulas are returned as images.
   formulaModel?: { provider: string; id: string }
   // Cached formula transcriptions.
