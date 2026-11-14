@@ -22,7 +22,7 @@ const dayMs = 24 * 60 * 60 * 1000
 /**
  * Part of every cache key: raise it when the prompt or output format changes, so old entries miss.
  */
-const cacheVersion = 1
+const cacheVersion = 2
 
 const systemPrompt =
   'You transcribe images of mathematical formulas into Typst math syntax (the content between $ $). ' +
@@ -30,11 +30,12 @@ const systemPrompt =
   'equation labels, answer labels such as (A) and words (as quoted text, e.g. "The solution is"), without ' +
   'solving, simplifying or correcting anything. Use Typst notation: frac(a, b) or (a)/(b) for fractions, ' +
   'x^2 and e^(pi t) for exponents, u_x for subscripts, sqrt(x), integral_a^b, sum_(n=1)^oo, hat(u), ' +
-  'cases(..., ...) for braces with several cases, \\ for line breaks and & for alignment. In cases(), ' +
-  'commas separate the rows: write a comma inside a row as \\, and put a condition after & in its row, ' +
-  'e.g. cases(f(x) = 1\\, & x > 0, f(x) = 0\\, & x <= 0). Keep letter styles: cal(L) for calligraphic, ' +
-  'bb(R) for blackboard bold, frak(g) for fraktur, bold(v) for bold. Answer with one ' +
-  'block per formula, in order:\nFormula <n>:\n<Typst math without $ delimiters or code fences>'
+  '\\ for line breaks and & for alignment. For braces with several cases, use cases() with each row on ' +
+  'its own line, ending with a comma, and the condition after &:\ncases(\n  f(x) = 1, & x > 0,\n  ' +
+  'f(x) = 0, & x <= 0,\n)\nKeep letter styles: cal(L) for calligraphic, bb(R) for blackboard bold, ' +
+  'frak(g) for fraktur, bold(v) for bold. Do not use LaTeX commands such as \\quad or \\{; write quad. ' +
+  'Answer with one block per formula, in order:\nFormula <n>:\n' +
+  '<Typst math without $ delimiters or code fences>'
 
 type ModelRegistry = ExtensionContext['modelRegistry']
 
@@ -170,16 +171,89 @@ const transcribeGroup = async (
 }
 
 /**
- * Removes what models add despite the instructions: code fences and $ delimiters.
+ * Removes what models add despite the instructions (code fences, $ delimiters) and escapes the commas
+ * inside cases() rows.
  */
 const cleanTypst = (text: string): string => {
   const typst = text
     .trim()
     .replace(/^```[a-z]*\n?|\n?```$/g, '')
     .trim()
-  return typst.length > 2 && typst.startsWith('$') && typst.endsWith('$')
-    ? typst.slice(1, -1).trim()
-    : typst
+  return escapeCasesRows(
+    typst.length > 2 && typst.startsWith('$') && typst.endsWith('$')
+      ? typst.slice(1, -1).trim()
+      : typst
+  )
+}
+
+/**
+ * In cases(), commas separate the rows, but models rarely escape commas inside a row (f(0) = a\, ...).
+ * So the prompt asks for one row per line, and in a multi-line cases() every comma directly inside it
+ * becomes \, except the one ending a line. Commas in nested calls (frac(a, b)) and quoted text stay;
+ * a single-line cases() is left as it is.
+ */
+const escapeCasesRows = (typst: string): string => {
+  let result = ''
+  let index = 0
+  while (index < typst.length) {
+    const start = typst.indexOf('cases(', index)
+    if (start === -1) {
+      return result + typst.slice(index)
+    }
+    const bodyStart = start + 'cases('.length
+    const bodyEnd = closingParentheses(typst, bodyStart)
+    const body = typst.slice(bodyStart, bodyEnd)
+    result +=
+      typst.slice(index, bodyStart) +
+      (body.includes('\n') ? body.split('\n').map(escapeRowCommas).join('\n') : body)
+    index = bodyEnd
+  }
+  return result
+}
+
+/**
+ * Index of the ) that closes the call whose arguments start at `from`; the text length if unclosed.
+ */
+const closingParentheses = (typst: string, from: number): number => {
+  let depth = 0
+  let quoted = false
+  for (let i = from; i < typst.length; i++) {
+    const char = typst[i]
+    if (char === '"' && typst[i - 1] !== '\\') {
+      quoted = !quoted
+    } else if (!quoted && '([{'.includes(char)) {
+      depth++
+    } else if (!quoted && ')]}'.includes(char)) {
+      if (depth === 0) {
+        return i
+      }
+      depth--
+    }
+  }
+  return typst.length
+}
+
+/**
+ * Escapes the unescaped commas of one row line outside nested calls and quotes, except a final one.
+ */
+const escapeRowCommas = (line: string): string => {
+  const end = line.trimEnd().length
+  let depth = 0
+  let quoted = false
+  let result = ''
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i]
+    if (char === '"' && line[i - 1] !== '\\') {
+      quoted = !quoted
+    } else if (!quoted && '([{'.includes(char)) {
+      depth++
+    } else if (!quoted && ')]}'.includes(char)) {
+      depth--
+    }
+    const inRow = char === ',' && !quoted && depth === 0 && line[i - 1] !== '\\'
+    result += inRow && i < end - 1 ? '\\,' : char
+  }
+  return result
 }
 
 interface FormulaCache {
