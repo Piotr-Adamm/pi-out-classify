@@ -14,7 +14,7 @@ import { CODEMODE_TOOL_NAME, parseCodemodeGoal } from './codemode.ts'
 import { loadConfig } from './config.ts'
 import type { OutClassifyConfig } from './config.ts'
 import { estimateBaseTokens, estimateSectionTokens } from './estimator.ts'
-import { extractDocument, supportsDocumentExtraction } from './extractor.ts'
+import { extractDocument, resolveReadPath, supportsDocumentExtraction } from './extractor.ts'
 import type { ExtractedDocument, Figure } from './extractor.ts'
 import { transcribeFormulas } from './formulas.ts'
 import { inlineFormulas, keptFormulas, reconstruct } from './reconstructor.ts'
@@ -291,7 +291,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     if (outputType === 'document') {
       // Native read returns raw PDF syntax, so never fall back to it.
       try {
-        document = await extractDocument(event.input.path as string, {
+        document = await extractDocument(resolveReadPath(event.input.path as string, ctx.cwd), {
           pythonPath: config.pythonPath,
           onWarning: (message) => ctx.ui.notify(`out-classify: ${message}`, 'warning'),
         })

@@ -7,6 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import type { ImageContent } from '@earendil-works/pi-ai'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
+import { expandHome } from './config.ts'
 
 const scriptPath = fileURLToPath(new URL('./extractor.py', import.meta.url))
 
@@ -63,6 +64,12 @@ function venvPython(venvDir: string): string {
   return process.platform === 'win32'
     ? join(venvDir, 'Scripts', 'python.exe')
     : join(venvDir, 'bin', 'python')
+}
+
+// The file a read means, resolved like pi's read does: a leading @ is dropped, ~ is the home
+// directory, relative paths start at the session's working directory.
+export function resolveReadPath(path: string, cwd: string): string {
+  return resolve(cwd, expandHome(path.startsWith('@') ? path.slice(1) : path))
 }
 
 export function supportsDocumentExtraction(path: string): boolean {

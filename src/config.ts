@@ -77,8 +77,12 @@ function loadKeyPath(config: Record<string, unknown>, key: string): string {
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error(`Out-classify ${key} must be a non-empty path.`)
   }
-  const path = value.trim().replace(/^~(?=$|[\\/])/, homedir())
-  return resolve(getAgentDir(), path)
+  return resolve(getAgentDir(), expandHome(value.trim()))
+}
+
+// A leading ~ is the home directory.
+export function expandHome(path: string): string {
+  return path.replace(/^~(?=$|[\\/])/, homedir())
 }
 
 // Loads a "provider/model" key; the model ID may contain further slashes.
