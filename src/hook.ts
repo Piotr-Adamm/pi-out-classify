@@ -217,6 +217,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       formulaText = await transcribeFormulas(formulas, {
         registry: ctx.modelRegistry,
         model,
+        thinkingLevel: session.config.formulaThinkingLevel,
         cacheDir: session.config.cacheDir,
         cacheMaxAgeDays: session.config.cacheMaxAgeDays,
         signal: ctx.signal,

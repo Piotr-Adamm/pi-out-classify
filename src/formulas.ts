@@ -8,6 +8,8 @@ import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/p
 import { join } from 'node:path'
 import type { Api, ImageContent, Model, TextContent } from '@earendil-works/pi-ai'
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { FORMULA_THINKING_LEVELS } from './config.ts'
+import type { FormulaThinkingLevel } from './config.ts'
 import type { Figure } from './extractor.ts'
 
 /**
@@ -18,9 +20,9 @@ const maxParallelRequests = 8
 const dayMs = 24 * 60 * 60 * 1000
 
 /**
- * Part of every cache key: change it when the prompt or output format changes, so old entries miss.
+ * Part of every cache key: raise it when the prompt or output format changes, so old entries miss.
  */
-const formatVersion = 'typst-1'
+const cacheVersion = 1
 
 const systemPrompt =
   'You transcribe images of mathematical formulas into Typst math syntax (the content between $ $). ' +
@@ -28,7 +30,10 @@ const systemPrompt =
   'equation labels, answer labels such as (A) and words (as quoted text, e.g. "The solution is"), without ' +
   'solving, simplifying or correcting anything. Use Typst notation: frac(a, b) or (a)/(b) for fractions, ' +
   'x^2 and e^(pi t) for exponents, u_x for subscripts, sqrt(x), integral_a^b, sum_(n=1)^oo, hat(u), ' +
-  'cases(..., ...) for braces with several cases, \\ for line breaks and & for alignment. Answer with one ' +
+  'cases(..., ...) for braces with several cases, \\ for line breaks and & for alignment. In cases(), ' +
+  'commas separate the rows: write a comma inside a row as \\, and put a condition after & in its row, ' +
+  'e.g. cases(f(x) = 1\\, & x > 0, f(x) = 0\\, & x <= 0). Keep letter styles: cal(L) for calligraphic, ' +
+  'bb(R) for blackboard bold, frak(g) for fraktur, bold(v) for bold. Answer with one ' +
   'block per formula, in order:\nFormula <n>:\n<Typst math without $ delimiters or code fences>'
 
 type ModelRegistry = ExtensionContext['modelRegistry']
@@ -36,6 +41,10 @@ type ModelRegistry = ExtensionContext['modelRegistry']
 export interface TranscribeOptions {
   registry: ModelRegistry
   model: Model<Api>
+  /**
+   * Reasoning effort of the formula model; "off" sends none.
+   */
+  thinkingLevel: FormulaThinkingLevel
   cacheDir: string
   /**
    * Cache entries unused for this many days are deleted; 0 keeps them forever.
@@ -61,7 +70,7 @@ export const transcribeFormulas = async (
 
   const missing: Figure[] = []
   for (const formula of formulas) {
-    const cached = await cache.get(formula.image)
+    const cached = await cache.get(formula.image, options.thinkingLevel)
     if (cached === undefined) {
       missing.push(formula)
     } else {
@@ -87,7 +96,7 @@ export const transcribeFormulas = async (
       }
       typst.set(formula.id, text)
       // A failing cache only costs speed.
-      await cache.set(formula.image, text).catch(() => {})
+      await cache.set(formula.image, text, options.thinkingLevel).catch(() => {})
     }
   })
 
@@ -133,7 +142,10 @@ const transcribeGroup = async (
     .streamSimple(
       options.model,
       { systemPrompt, messages: [{ role: 'user', content, timestamp: Date.now() }] },
-      { reasoning: 'minimal', signal: options.signal }
+      {
+        ...(options.thinkingLevel === 'off' ? {} : { reasoning: options.thinkingLevel }),
+        signal: options.signal,
+      }
     )
     .result()
   if (message.stopReason === 'error' || message.stopReason === 'aborted') {
@@ -171,8 +183,11 @@ const cleanTypst = (text: string): string => {
 }
 
 interface FormulaCache {
-  get: (image: ImageContent) => Promise<string | undefined>
-  set: (image: ImageContent, typst: string) => Promise<void>
+  /**
+   * The cached Typst, if it was made with this thinking level or a higher one.
+   */
+  get: (image: ImageContent, thinkingLevel: FormulaThinkingLevel) => Promise<string | undefined>
+  set: (image: ImageContent, typst: string, thinkingLevel: FormulaThinkingLevel) => Promise<void>
   /**
    * Deletes entries unused for maxAgeMs, once per process and directory.
    */
@@ -182,35 +197,41 @@ interface FormulaCache {
 const cleanedUpDirs = new Set<string>()
 
 /**
- * One file per formula, named by a hash of the format, the model and the formula image: moved,
- * renamed or edited PDFs still hit for unchanged formulas, and another model computes its own. The
- * files hold document content, so only their owner may read them.
+ * One file per formula, named by a hash of the cache version, the model and the formula image: moved,
+ * renamed or edited PDFs still hit for unchanged formulas, and another model computes its own. Each
+ * file holds { thinkingLevel, typst }; a transcription at a lower level than configured is redone and
+ * replaced. The files hold document content, so only their owner may read them.
  */
 const createCache = (dir: string, model: string): FormulaCache => {
   const pathOf = (image: ImageContent): string => {
     const hash = createHash('sha256')
-      .update(`${formatVersion}\0${model}\0`)
+      .update(`${cacheVersion}\0${model}\0`)
       .update(image.data)
       .digest('hex')
-    return join(dir, `${hash}.typ`)
+    return join(dir, `${hash}.json`)
   }
+  const rank = (level: unknown): number => FORMULA_THINKING_LEVELS.indexOf(level as never)
 
   return {
-    get: async (image) => {
+    get: async (image, thinkingLevel) => {
       const path = pathOf(image)
+      let entry: { thinkingLevel?: unknown; typst?: unknown }
       try {
-        const typst = await readFile(path, 'utf8')
-        const now = new Date()
-        // Used: its age for cleanUp starts again.
-        await utimes(path, now, now).catch(() => {})
-        return typst
+        entry = JSON.parse(await readFile(path, 'utf8'))
       } catch {
         return undefined
       }
+      if (typeof entry?.typst !== 'string' || rank(entry.thinkingLevel) < rank(thinkingLevel)) {
+        return undefined
+      }
+      const now = new Date()
+      // Used: its age for cleanUp starts again.
+      await utimes(path, now, now).catch(() => {})
+      return entry.typst
     },
-    set: async (image, typst) => {
+    set: async (image, typst, thinkingLevel) => {
       await mkdir(dir, { recursive: true, mode: 0o700 })
-      await writeFile(pathOf(image), typst, { mode: 0o600 })
+      await writeFile(pathOf(image), JSON.stringify({ thinkingLevel, typst }), { mode: 0o600 })
     },
     cleanUp: async (maxAgeMs) => {
       if (cleanedUpDirs.has(dir)) {
@@ -221,7 +242,7 @@ const createCache = (dir: string, model: string): FormulaCache => {
       const cutoff = Date.now() - maxAgeMs
       await Promise.all(
         names
-          .filter((name) => name.endsWith('.typ'))
+          .filter((name) => name.endsWith('.json'))
           .map(async (name) => {
             const path = join(dir, name)
             const info = await stat(path).catch(() => undefined)

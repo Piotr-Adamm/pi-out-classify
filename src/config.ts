@@ -13,6 +13,8 @@ export interface OutClassifyConfig {
   // "provider/model" of a vision model that transcribes kept PDF formulas to Typst math. Without it,
   // formulas are returned as images.
   formulaModel?: { provider: string; id: string }
+  // Reasoning effort of the formula model; "off" sends none.
+  formulaThinkingLevel: FormulaThinkingLevel
   // Cached formula transcriptions.
   cacheDir: string
   // Cache entries unused for this many days are deleted; 0 keeps them forever.
@@ -24,6 +26,19 @@ const DEFAULT_THRESHOLD_IMAGES = 5
 const DEFAULT_MAX_SECTION_CHARS = 2000
 const CACHE_DIR_NAME = 'pi-out-classify'
 const DEFAULT_CACHE_MAX_AGE_DAYS = 30
+// Lowest to highest; the formula cache compares levels by this order.
+export const FORMULA_THINKING_LEVELS = [
+  'off',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const
+export type FormulaThinkingLevel = (typeof FORMULA_THINKING_LEVELS)[number]
+// Transcription barely gains from reasoning, but it adds latency.
+const DEFAULT_FORMULA_THINKING_LEVEL: FormulaThinkingLevel = 'minimal'
 
 // The user's cache directory: $XDG_CACHE_HOME if set to an absolute path (XDG Base Directory spec),
 // %LOCALAPPDATA% on Windows, otherwise ~/.cache.
@@ -79,6 +94,21 @@ function loadKeyModel(
   return { provider: value.slice(0, slash), id: value.slice(slash + 1) }
 }
 
+// Loads a key that must be one of `choices`, using the default when missing.
+function loadKeyChoice<T extends string>(
+  config: Record<string, unknown>,
+  key: string,
+  choices: readonly T[],
+  fallback: T
+): T {
+  const value = config[key] === undefined ? fallback : config[key]
+  if (!choices.includes(value as T)) {
+    const list = choices.map((choice) => `"${choice}"`).join(', ')
+    throw new Error(`Out-classify ${key} must be one of ${list}.`)
+  }
+  return value as T
+}
+
 export async function loadConfig(): Promise<OutClassifyConfig> {
   const configPath = resolve(getAgentDir(), 'out-classify.json')
   let config: Record<string, unknown>
@@ -106,6 +136,12 @@ export async function loadConfig(): Promise<OutClassifyConfig> {
     ...(config.formulaModel === undefined
       ? {}
       : { formulaModel: loadKeyModel(config, 'formulaModel') }),
+    formulaThinkingLevel: loadKeyChoice(
+      config,
+      'formulaThinkingLevel',
+      FORMULA_THINKING_LEVELS,
+      DEFAULT_FORMULA_THINKING_LEVEL
+    ),
     cacheDir: config.cacheDir === undefined ? defaultCacheDir() : loadKeyPath(config, 'cacheDir'),
     cacheMaxAgeDays: loadKeyInteger(config, 'cacheMaxAgeDays', DEFAULT_CACHE_MAX_AGE_DAYS, 0),
   }
