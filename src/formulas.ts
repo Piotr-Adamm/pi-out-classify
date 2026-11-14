@@ -22,7 +22,7 @@ const dayMs = 24 * 60 * 60 * 1000
 /**
  * Part of every cache key: raise it when the prompt or output format changes, so old entries miss.
  */
-const cacheVersion = 2
+const cacheVersion = 3
 
 const systemPrompt =
   'You transcribe images of mathematical formulas into Typst math syntax (the content between $ $). ' +
@@ -34,6 +34,10 @@ const systemPrompt =
   'its own line, ending with a comma, and the condition after &:\ncases(\n  f(x) = 1, & x > 0,\n  ' +
   'f(x) = 0, & x <= 0,\n)\nKeep letter styles: cal(L) for calligraphic, bb(R) for blackboard bold, ' +
   'frak(g) for fraktur, bold(v) for bold. Do not use LaTeX commands such as \\quad or \\{; write quad. ' +
+  'An image may be followed by the text layer of the PDF for that formula. It loses structure and letter ' +
+  'styles (s2 can be s^2, fractions are flattened, a calligraphic L is a plain L), but its symbols are ' +
+  'exact: take structure and letter styles from the image, and use the text layer to check which ' +
+  'symbols, digits and letters are meant (pi, not 9). ' +
   'Answer with one block per formula, in order:\nFormula <n>:\n' +
   '<Typst math without $ delimiters or code fences>'
 
@@ -137,6 +141,10 @@ const transcribeGroup = async (
   group.forEach((formula, index) => {
     content.push({ type: 'text', text: `Formula ${index + 1}:` })
     content.push(formula.image)
+    // The image shows the structure, the text layer the exact symbols (π was misread as 9 without it).
+    if (formula.textLayer) {
+      content.push({ type: 'text', text: `Text layer: ${formula.textLayer}` })
+    }
   })
 
   const message = await options.registry
