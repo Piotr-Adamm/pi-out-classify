@@ -69,7 +69,7 @@ Optional `out-classify.json` in pi's data directory (`~/.pi/agent/out-classify.j
 ```json
 {
   "thresholdChars": 8000,
-  "thresholdImages": 5,
+  "thresholdImages": 3,
   "maxSectionChars": 2000,
   "pythonPath": "/path/to/venv/bin/python"
 }
@@ -78,7 +78,7 @@ Optional `out-classify.json` in pi's data directory (`~/.pi/agent/out-classify.j
 | Key | Default | Description |
 |---|---|---|
 | `thresholdChars` | 8000 | Text shorter than this (in total per output) is not classified. |
-| `thresholdImages` | 5 | Fewer images than this are not classified. |
+| `thresholdImages` | 3 | Fewer images than this are not classified. |
 | `maxSectionChars` | 2000 | Maximum section length; at least 100. |
 | `pythonPath` | – | Python with Docling for PDFs, instead of the managed venv. |
 

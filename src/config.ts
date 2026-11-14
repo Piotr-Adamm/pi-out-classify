@@ -22,7 +22,7 @@ export interface OutClassifyConfig {
 }
 
 const DEFAULT_THRESHOLD_CHARS = 8000
-const DEFAULT_THRESHOLD_IMAGES = 5
+const DEFAULT_THRESHOLD_IMAGES = 3
 const DEFAULT_MAX_SECTION_CHARS = 2000
 const CACHE_DIR_NAME = 'pi-out-classify'
 const DEFAULT_CACHE_MAX_AGE_DAYS = 30
