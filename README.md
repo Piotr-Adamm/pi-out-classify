@@ -41,17 +41,27 @@ If classification fails, the affected sections and images are kept, with a notic
 
 What the agent gets, shortened. Images are real image blocks in the result, shown here as `<image: …>`.
 
-**Text:** `read` on a source file, with the goal "how are the thresholds checked":
+**Text:** `read` on pi's `docs/extensions.md` from line 1124, with the goal "how do I register a keyboard shortcut". Of 51,234 characters, 1,196 are kept. read's footer is always kept, so the agent can continue:
 
+````
+[out-classify: lines 1124–1835 omitted, deemed not relevant to the task]
+[...]
+### pi.registerShortcut(shortcut, options)
+
+Register a keyboard shortcut. See [keybindings.md](keybindings.md) for the shortcut format and built-in keybindings.
+
+```typescript
+pi.registerShortcut("ctrl+shift+p", {
+  description: "Toggle plan mode",
+  handler: async (ctx) => {
+    ctx.ui.notify("Toggled!");
+  },
+});
 ```
 [...]
-const READ_FOOTER = /\n\n\[[^\]\n]*Use offset=\d+ to continue\.\]\s*$/
-
-[out-classify: lines 35–216 omitted, deemed not relevant to the task]
-      formulaText = await transcribeFormulas(formulas, {
-        registry: ctx.modelRegistry,
-[...]
-```
+[out-classify: lines 1873–2275 omitted, deemed not relevant to the task]
+[Showing lines 1124-2275 of 3348 (50.0KB limit). Use offset=2276 to continue.]
+````
 
 **PDF:** an exam, with the goal "the first two questions". The cover pages and Question 3 are omitted. The formula tables on the cover pages are kept, because the questions need them. Formulas are transcribed to Typst math:
 

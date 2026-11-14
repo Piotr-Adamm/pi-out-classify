@@ -7,19 +7,24 @@
  *
  * Text goes to stdout as the agent sees it; images are saved as PNG files and shown as
  * [image n: path]. Notifications (warnings, errors) and a summary go to stderr. Without a goal, the
- * output is not classified (a read without goal and without user messages). Text files are passed in
- * whole, without read's line limit and truncation footer.
+ * output is not classified (a read without goal and without user messages). Other files go through
+ * pi's read first, with its line limit and truncation footer.
  */
 
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import type { ImageContent, TextContent } from '@earendil-works/pi-ai'
-import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent'
+import {
+  createReadToolDefinition,
+  ModelRegistry,
+  ModelRuntime,
+} from '@earendil-works/pi-coding-agent'
 import type {
   ExtensionAPI,
   ExtensionContext,
+  ExtensionToolContext,
   ToolResultEvent,
 } from '@earendil-works/pi-coding-agent'
 import { resolveReadPath, supportsDocumentExtraction } from '../src/extractor.ts'
@@ -69,10 +74,20 @@ const input = {
   ...(values.offset ? { offset: Number(values.offset) } : {}),
   ...(values.limit ? { limit: Number(values.limit) } : {}),
 }
-// Documents are extracted by the hook; other files come in as read's text.
+// Documents are extracted by the hook; other files come in as pi's read returns them.
+const { goal: _goal, ...readInput } = input
 const original: (TextContent | ImageContent)[] = supportsDocumentExtraction(path)
   ? []
-  : [{ type: 'text', text: await readFile(path, 'utf8') }]
+  : (
+      await createReadToolDefinition(process.cwd()).execute(
+        'preview',
+        readInput,
+        undefined,
+        undefined,
+        // read uses the context's cwd, and its model for images; the rest of a tool context is unused.
+        ctx as ExtensionToolContext
+      )
+    ).content
 const event = {
   type: 'tool_result',
   toolName: 'read',
