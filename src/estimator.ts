@@ -1,6 +1,6 @@
 import { countTokens } from 'gpt-tokenizer/encoding/o200k_base'
 import type { OutputSection } from './batcher.ts'
-import { requestBase, buildQuestion, sectionState } from './classifier.ts'
+import { requestBase, buildQuestion, requestSectionId, sectionState } from './classifier.ts'
 import type { ClassificationTaskContext } from './classifier.ts'
 
 // o200k only approximates Jev's tokenizer; maxBatchTokens keeps a margin for that.
@@ -15,12 +15,15 @@ export function estimateBaseTokens(context: ClassificationTaskContext): number {
 }
 
 // Counted once per section: its state entry plus its question. Added to the base for each batch.
+// The request ID depends on the section's place in its batch, which is not known yet; a three-digit
+// one (s100) is never shorter.
 export function estimateSectionTokens(
   section: OutputSection,
   context: ClassificationTaskContext
 ): number {
+  const id = requestSectionId(99)
   return (
-    tokens(sectionState(section, context)) +
-    tokens({ [section.id]: buildQuestion(`section ${section.id}`, 'section text', context) })
+    tokens(sectionState(id, section, context)) +
+    tokens({ [id]: buildQuestion(`section ${id}`, 'section text', context) })
   )
 }

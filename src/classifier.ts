@@ -47,14 +47,26 @@ export function buildClassifierRequest(
 
   const { state } = requestBase(context)
   return {
-    state: { ...state, sections: sections.map((section) => sectionState(section, context)) },
+    state: {
+      ...state,
+      sections: sections.map((section, index) =>
+        sectionState(requestSectionId(index), section, context)
+      ),
+    },
     questions: Object.fromEntries(
-      sections.map((section) => [
-        section.id,
-        buildQuestion(`section ${section.id}`, 'section text', context),
-      ])
+      sections.map((_section, index) => {
+        const id = requestSectionId(index)
+        return [id, buildQuestion(`section ${id}`, 'section text', context)]
+      })
     ),
   }
+}
+
+// The ID of the index-th section within one request. Jev mixes up long, similar IDs such as
+// section_630_951 and section_951_1568 (it dropped the wrong section in 6 of 10 runs), so each request
+// numbers its sections s1, s2, …; answers are mapped back by position.
+export function requestSectionId(index: number): string {
+  return `s${index + 1}`
 }
 
 // The three builders below are shared with estimator.ts, so the estimate counts exactly what is sent.
@@ -75,12 +87,14 @@ export function requestBase(context: ClassificationTaskContext) {
   }
 }
 
-// One section's entry in state.sections.
-export function sectionState(section: OutputSection, context: ClassificationTaskContext) {
+// One section's entry in state.sections, under its request ID (requestSectionId).
+export function sectionState(
+  id: string,
+  section: OutputSection,
+  context: ClassificationTaskContext
+) {
   return {
-    id: section.id,
-    start: section.start,
-    end: section.end,
+    id,
     text: withFormulaTextLayers(section.text, context.formulaTextLayers),
   }
 }
@@ -101,7 +115,7 @@ export function withFormulaTextLayers(
 }
 
 // The keep / uncertain / discard question, shared by text sections and images, so both are judged
-// by the same rules. subject: what is classified ("section section_0_200", "this image");
+// by the same rules. subject: what is classified ("section s3", "this image");
 // untrusted: the content that must not be followed as instructions (prompt injection).
 export function buildQuestion(
   subject: string,
@@ -174,8 +188,8 @@ async function classifyTextBatch(
       signal,
       timeout: REQUEST_TIMEOUT_MS,
     })
-    return sections.map((section) => {
-      const answer = answers[section.id]
+    return sections.map((section, index) => {
+      const answer = answers[requestSectionId(index)]
       // A missing or unknown answer keeps the section.
       const choice =
         answer?.type === 'choice' && CHOICES.has(answer.choice) ? answer.choice : 'uncertain'
