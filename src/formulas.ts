@@ -1,13 +1,12 @@
 /**
  * @module
- * Transcribes cropped PDF formulas to Typst math with a vision model, cached per formula image.
+ * Transcribes cropped PDF formulas to Typst math with a vision model, cached in the document's cache
+ * item, one file per model.
  */
 
-import { createHash } from 'node:crypto'
-import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import type { Api, ImageContent, Model, TextContent } from '@earendil-works/pi-ai'
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent'
+import type { CacheItem } from './cache.ts'
 import { FORMULA_THINKING_LEVELS } from './config.ts'
 import type { FormulaThinkingLevel } from './config.ts'
 import type { Figure } from './extractor.ts'
@@ -17,12 +16,23 @@ import type { Figure } from './extractor.ts'
  */
 const maxFormulasPerRequest = 12
 const maxParallelRequests = 8
-const dayMs = 24 * 60 * 60 * 1000
 
 /**
- * Part of every cache key: raise it when the prompt or output format changes, so old entries miss.
+ * Stored in every transcription file: raise it when the prompt or output format changes, so files
+ * with another version are ignored and overwritten.
  */
-const cacheVersion = 3
+const formulaCacheVersion = 3
+
+/**
+ * A model's transcription file in a document's cache item. Formula IDs are stable for a cached
+ * document, so they key the transcriptions; an edited PDF is another document, so its formulas are
+ * transcribed again.
+ */
+interface TranscriptionFile {
+  formulaCacheVersion: number
+  model: string
+  formulas: Record<string, { thinkingLevel: FormulaThinkingLevel; typst: string }>
+}
 
 const systemPrompt =
   'You transcribe images of mathematical formulas into Typst math syntax (the content between $ $). ' +
@@ -50,11 +60,10 @@ export interface TranscribeOptions {
    * Reasoning effort of the formula model; "off" sends none.
    */
   thinkingLevel: FormulaThinkingLevel
-  cacheDir: string
   /**
-   * Cache entries unused for this many days are deleted; 0 keeps them forever.
+   * The document's cache item; without it, nothing is cached.
    */
-  cacheMaxAgeDays: number
+  cache: CacheItem | undefined
   signal: AbortSignal | undefined
   /**
    * Gets the error of a failed request; its formulas stay untranscribed (they are returned as images).
@@ -71,44 +80,97 @@ export const transcribeFormulas = async (
   options: TranscribeOptions
 ): Promise<Map<string, string>> => {
   const typst = new Map<string, string>()
-  const cache = createCache(options.cacheDir, `${options.model.provider}/${options.model.id}`)
+  const model = `${options.model.provider}/${options.model.id}`
+  const stored = options.cache ? await readTranscriptionFile(options.cache, model) : {}
 
   const missing: Figure[] = []
   for (const formula of formulas) {
-    const cached = await cache.get(formula.image, options.thinkingLevel)
-    if (cached === undefined) {
-      missing.push(formula)
+    const cached = stored[formula.id]
+    if (
+      typeof cached?.typst === 'string' &&
+      rank(cached.thinkingLevel) >= rank(options.thinkingLevel)
+    ) {
+      typst.set(formula.id, cached.typst)
     } else {
-      typst.set(formula.id, cached)
+      missing.push(formula)
     }
   }
 
-  await mapWithLimit(requestGroups(missing), maxParallelRequests, async (group) => {
-    let transcribed: Map<string, string>
-    try {
-      transcribed = await transcribeGroup(group, options)
-    } catch (error) {
-      if (options.signal?.aborted) {
-        throw error
+  const transcribed = new Map<string, string>()
+  try {
+    await mapWithLimit(requestGroups(missing), maxParallelRequests, async (group) => {
+      let answer: Map<string, string>
+      try {
+        answer = await transcribeGroup(group, options)
+      } catch (error) {
+        if (options.signal?.aborted) {
+          throw error
+        }
+        options.onError(error)
+        return
       }
-      options.onError(error)
-      return
-    }
-    for (const formula of group) {
-      const text = transcribed.get(formula.id)
-      if (text === undefined) {
-        continue
+      for (const [id, text] of answer) {
+        typst.set(id, text)
+        transcribed.set(id, text)
       }
-      typst.set(formula.id, text)
-      // A failing cache only costs speed.
-      await cache.set(formula.image, text, options.thinkingLevel).catch(() => {})
+    })
+  } finally {
+    // Also when cancelled: groups that finished need no request next time. A failing cache only
+    // costs speed.
+    if (options.cache && transcribed.size > 0) {
+      await saveTranscriptions(options.cache, model, transcribed, options.thinkingLevel).catch(
+        () => {}
+      )
     }
-  })
-
-  if (options.cacheMaxAgeDays > 0) {
-    await cache.cleanUp(options.cacheMaxAgeDays * dayMs)
   }
   return typst
+}
+
+const rank = (level: unknown): number => FORMULA_THINKING_LEVELS.indexOf(level as never)
+
+/**
+ * The model's stored transcriptions; empty if there are none, they are unreadable, or they were made
+ * with another formulaCacheVersion or another model (two models whose file names clash).
+ */
+const readTranscriptionFile = async (
+  cache: CacheItem,
+  model: string
+): Promise<Partial<TranscriptionFile['formulas']>> => {
+  const file = (await cache.readTranscriptions(model)) as Partial<TranscriptionFile> | undefined
+  if (
+    file?.formulaCacheVersion !== formulaCacheVersion ||
+    file.model !== model ||
+    typeof file.formulas !== 'object' ||
+    file.formulas === null
+  ) {
+    return {}
+  }
+  return file.formulas
+}
+
+/**
+ * Merges new transcriptions into the model's file. It is read again right before writing, so what
+ * another session stored meanwhile is kept, unless it is the same formula at a lower thinking level.
+ */
+const saveTranscriptions = async (
+  cache: CacheItem,
+  model: string,
+  transcribed: Map<string, string>,
+  thinkingLevel: FormulaThinkingLevel
+): Promise<void> => {
+  const formulas = { ...(await readTranscriptionFile(cache, model)) }
+  for (const [id, typst] of transcribed) {
+    const current = formulas[id]
+    if (!current || rank(current.thinkingLevel) <= rank(thinkingLevel)) {
+      formulas[id] = { thinkingLevel, typst }
+    }
+  }
+  const file: TranscriptionFile = {
+    formulaCacheVersion,
+    model,
+    formulas: formulas as TranscriptionFile['formulas'],
+  }
+  await cache.writeTranscriptions(model, file)
 }
 
 /**
@@ -262,79 +324,6 @@ const escapeRowCommas = (line: string): string => {
     result += inRow && i < end - 1 ? '\\,' : char
   }
   return result
-}
-
-interface FormulaCache {
-  /**
-   * The cached Typst, if it was made with this thinking level or a higher one.
-   */
-  get: (image: ImageContent, thinkingLevel: FormulaThinkingLevel) => Promise<string | undefined>
-  set: (image: ImageContent, typst: string, thinkingLevel: FormulaThinkingLevel) => Promise<void>
-  /**
-   * Deletes entries unused for maxAgeMs, once per process and directory.
-   */
-  cleanUp: (maxAgeMs: number) => Promise<void>
-}
-
-const cleanedUpDirs = new Set<string>()
-
-/**
- * One file per formula, named by a hash of the cache version, the model and the formula image: moved,
- * renamed or edited PDFs still hit for unchanged formulas, and another model computes its own. Each
- * file holds { thinkingLevel, typst }; a transcription at a lower level than configured is redone and
- * replaced. The files hold document content, so only their owner may read them.
- */
-const createCache = (dir: string, model: string): FormulaCache => {
-  const pathOf = (image: ImageContent): string => {
-    const hash = createHash('sha256')
-      .update(`${cacheVersion}\0${model}\0`)
-      .update(image.data)
-      .digest('hex')
-    return join(dir, `${hash}.json`)
-  }
-  const rank = (level: unknown): number => FORMULA_THINKING_LEVELS.indexOf(level as never)
-
-  return {
-    get: async (image, thinkingLevel) => {
-      const path = pathOf(image)
-      let entry: { thinkingLevel?: unknown; typst?: unknown }
-      try {
-        entry = JSON.parse(await readFile(path, 'utf8'))
-      } catch {
-        return undefined
-      }
-      if (typeof entry?.typst !== 'string' || rank(entry.thinkingLevel) < rank(thinkingLevel)) {
-        return undefined
-      }
-      const now = new Date()
-      // Used: its age for cleanUp starts again.
-      await utimes(path, now, now).catch(() => {})
-      return entry.typst
-    },
-    set: async (image, typst, thinkingLevel) => {
-      await mkdir(dir, { recursive: true, mode: 0o700 })
-      await writeFile(pathOf(image), JSON.stringify({ thinkingLevel, typst }), { mode: 0o600 })
-    },
-    cleanUp: async (maxAgeMs) => {
-      if (cleanedUpDirs.has(dir)) {
-        return
-      }
-      cleanedUpDirs.add(dir)
-      const names = await readdir(dir).catch((): string[] => [])
-      const cutoff = Date.now() - maxAgeMs
-      await Promise.all(
-        names
-          .filter((name) => name.endsWith('.json'))
-          .map(async (name) => {
-            const path = join(dir, name)
-            const info = await stat(path).catch(() => undefined)
-            if (info && info.mtimeMs < cutoff) {
-              await rm(path, { force: true })
-            }
-          })
-      )
-    },
-  }
 }
 
 const mapWithLimit = async <T>(

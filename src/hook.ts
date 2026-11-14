@@ -200,9 +200,10 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     }
   })
 
-  // Typst math for the kept formulas, if a formula model is configured. Formulas it cannot transcribe
-  // are returned as images.
+  // Typst math for the kept formulas of the document, if a formula model is configured. Formulas it
+  // cannot transcribe are returned as images.
   const transcribeKeptFormulas = async (
+    document: ExtractedDocument,
     formulas: Figure[],
     ctx: ExtensionContext
   ): Promise<Map<string, string>> => {
@@ -218,8 +219,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
         registry: ctx.modelRegistry,
         model,
         thinkingLevel: session.config.formulaThinkingLevel,
-        cacheDir: session.config.cacheDir,
-        cacheMaxAgeDays: session.config.cacheMaxAgeDays,
+        cache: document.cacheItem,
         signal: ctx.signal,
         onError: (cause) => {
           error ??= cause
@@ -293,6 +293,8 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       try {
         document = await extractDocument(resolveReadPath(event.input.path as string, ctx.cwd), {
           pythonPath: config.pythonPath,
+          cacheDir: config.cacheDir,
+          cacheMaxAgeDays: config.cacheMaxAgeDays,
           onWarning: (message) => ctx.ui.notify(`out-classify: ${message}`, 'warning'),
         })
       } catch (error) {
@@ -309,7 +311,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
         return documentOutput(
           document,
           config.maxSectionChars,
-          await transcribeKeptFormulas(getFormulasFromDocument(document), ctx)
+          await transcribeKeptFormulas(document, getFormulasFromDocument(document), ctx)
         )
       }
 
@@ -374,7 +376,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
           ? documentOutput(
               document,
               config.maxSectionChars,
-              await transcribeKeptFormulas(getFormulasFromDocument(document), ctx)
+              await transcribeKeptFormulas(document, getFormulasFromDocument(document), ctx)
             )
           : undefined
       }
@@ -453,6 +455,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       batches.length > 0 ? batches.flatMap((batch) => batch.sections) : sections
     const formulaText = document
       ? await transcribeKeptFormulas(
+          document,
           keptFormulas(document.figures, classifiedSections, results),
           ctx
         )

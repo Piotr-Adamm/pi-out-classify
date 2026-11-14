@@ -7,6 +7,8 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import type { ImageContent } from '@earendil-works/pi-ai'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
+import { cacheKey, cleanUpCache, loadDocument, storeDocument } from './cache.ts'
+import type { CacheItem } from './cache.ts'
 import { expandHome } from './config.ts'
 
 const scriptPath = fileURLToPath(new URL('./extractor.py', import.meta.url))
@@ -14,6 +16,9 @@ const scriptPath = fileURLToPath(new URL('./extractor.py', import.meta.url))
 // The Docling version out-classify installs and is tested with. Changing it reinstalls the venv and
 // downloads the models again.
 const DOCLING_VERSION = '2.144.0'
+// Part of every document cache key: raise it when extractor.py's output (Markdown, figures, formula
+// links, text layers) changes, so cached extractions are redone.
+const DOCUMENT_CACHE_VERSION = 1
 // Written last by each setup step and holding what it was set up for, so an interrupted or outdated
 // step is repeated.
 const INSTALLED_MARKER = '.installed'
@@ -40,6 +45,8 @@ export interface Figure {
 export interface ExtractedDocument {
   markdown: string
   figures: Figure[]
+  // The document's cache item, for its formula transcriptions; none if it is not cached.
+  cacheItem?: CacheItem
 }
 
 export interface ExtractorOptions {
@@ -47,6 +54,10 @@ export interface ExtractorOptions {
   pythonPath?: string
   // Called once per setup, e.g. when pythonPath has another Docling version than DOCLING_VERSION.
   onWarning?: (message: string) => void
+  // Extractions are cached here (see cache.ts); without it, every read extracts again.
+  cacheDir?: string
+  // Cache items not modified for this many days are deleted; 0 keeps them forever.
+  cacheMaxAgeDays?: number
 }
 
 interface Setup {
@@ -147,14 +158,37 @@ async function withLock<T>(lockDir: string, task: () => Promise<T>): Promise<T> 
 
 // Installs what is missing or outdated and returns the Python to run extractor.py with. With
 // pythonPath, that Python is used as it is: nothing is installed, only its models are downloaded.
+// One lookup per process and pythonPath; a failed one is tried again next time.
+let doclingVersionLookup: { pythonPath: string | undefined; promise: Promise<string> } | undefined
+
+// The Docling version extraction runs with: the pinned one for the managed venv (known without setting
+// it up, so a cache hit needs no setup), otherwise the version installed in pythonPath.
+function getDoclingVersion(pythonPath: string | undefined): Promise<string> {
+  if (pythonPath === undefined) {
+    return Promise.resolve(DOCLING_VERSION)
+  }
+  if (doclingVersionLookup?.pythonPath !== pythonPath) {
+    const promise = run(pythonPath, [scriptPath, 'version']).then(
+      (output) => output.trim(),
+      (error) => {
+        if (doclingVersionLookup?.promise === promise) {
+          doclingVersionLookup = undefined
+        }
+        throw error
+      }
+    )
+    doclingVersionLookup = { pythonPath, promise }
+  }
+  return doclingVersionLookup.promise
+}
+
 async function setUp({ pythonPath, onWarning }: ExtractorOptions): Promise<Setup> {
   const venvDir = join(dataDir(), 'venv')
   const modelsDir = join(dataDir(), 'models')
   const python = pythonPath ?? venvPython(venvDir)
   const requirement = `docling==${DOCLING_VERSION}`
 
-  const doclingVersion =
-    pythonPath === undefined ? DOCLING_VERSION : (await run(python, [scriptPath, 'version'])).trim()
+  const doclingVersion = await getDoclingVersion(pythonPath)
   if (doclingVersion !== DOCLING_VERSION) {
     onWarning?.(
       `pythonPath has Docling ${doclingVersion}; out-classify is tested with ${DOCLING_VERSION}.`
@@ -189,9 +223,44 @@ async function setUp({ pythonPath, onWarning }: ExtractorOptions): Promise<Setup
 // again next time.
 let setup: { pythonPath: string | undefined; promise: Promise<Setup> } | undefined
 
+// The document from the cache if it has it, otherwise extracted with Docling and stored in the cache.
+// Without cacheDir, or if the cache fails, it is just extracted.
 export async function extractDocument(
   path: string,
   options: ExtractorOptions = {}
+): Promise<ExtractedDocument> {
+  const { cacheDir } = options
+  if (cacheDir === undefined) {
+    return extractWithDocling(path, options)
+  }
+
+  // Key: the PDF's content, so moved or renamed files hit and edited ones miss, and what the
+  // extraction was made with. Unreadable file or failing pythonPath: extraction reports the error.
+  let key: string | undefined
+  try {
+    key = cacheKey(await readFile(resolve(path)), [
+      `document-cache-${DOCUMENT_CACHE_VERSION}`,
+      `docling-${await getDoclingVersion(options.pythonPath)}`,
+    ])
+  } catch {}
+
+  try {
+    const cached = key === undefined ? undefined : await loadDocument(cacheDir, key)
+    if (cached) {
+      return { ...cached.document, cacheItem: cached.item }
+    }
+    const document = await extractWithDocling(path, options)
+    const cacheItem = key === undefined ? undefined : await storeDocument(cacheDir, key, document)
+    return cacheItem ? { ...document, cacheItem } : document
+  } finally {
+    // In the background: the read does not wait for it.
+    void cleanUpCache(cacheDir, options.cacheMaxAgeDays ?? 0).catch(() => {})
+  }
+}
+
+async function extractWithDocling(
+  path: string,
+  options: ExtractorOptions
 ): Promise<ExtractedDocument> {
   if (!setup || setup.pythonPath !== options.pythonPath) {
     const promise = setUp(options).catch((error) => {

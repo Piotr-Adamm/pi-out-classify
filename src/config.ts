@@ -15,9 +15,9 @@ export interface OutClassifyConfig {
   formulaModel?: { provider: string; id: string }
   // Reasoning effort of the formula model; "off" sends none.
   formulaThinkingLevel: FormulaThinkingLevel
-  // Cached formula transcriptions.
+  // Cached PDF extractions with their formula transcriptions, one folder per document.
   cacheDir: string
-  // Cache entries unused for this many days are deleted; 0 keeps them forever.
+  // Cached documents unused for this many days are deleted; 0 keeps them forever.
   cacheMaxAgeDays: number
 }
 

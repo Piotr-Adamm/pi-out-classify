@@ -33,7 +33,7 @@ Requirements:
    - With a `formulaModel` configured, the kept formulas are transcribed to Typst math with that vision model and stand in the text as `$ … $`. The model gets the image and the text layer: the image for structure and letter styles, the text layer to check the exact symbols.
    - Without one, or for formulas that could not be transcribed, they are returned as images after their section.
 
-   Transcriptions are cached per formula image and model, so a formula is transcribed only once, even if the PDF is moved, renamed or edited elsewhere. A transcription made with a lower `formulaThinkingLevel` than configured is redone.
+   Transcriptions are cached with the document (see [Cache](#cache)), per model, so a formula is transcribed only once. A transcription made with a lower `formulaThinkingLevel` than configured is redone. An edited PDF is a new document, so its formulas are transcribed again.
 
 If classification fails, the affected sections and images are kept, with a notice. A PDF that cannot be extracted gives an error instead of raw PDF syntax.
 
@@ -128,6 +128,24 @@ Both are kept across out-classify updates. When a new version pins another Docli
 
 To use a Python that already has Docling instead, set `pythonPath` (see below). Then nothing is installed except the models. Another Docling version than 2.144.0 works, but gives a warning.
 
+## Cache
+
+Extracting a PDF takes seconds to minutes, so each extracted PDF is cached, together with its formula transcriptions. Reading the same PDF again skips Docling and the formula model; only the classification runs again, because the goal may differ. For an 8-page exam, a read went from 35 s to 0.5 s.
+
+The cache is in `cacheDir` (`~/.cache/pi-out-classify/` by default), one folder per PDF:
+
+```
+~/.cache/pi-out-classify/
+└── <SHA-256 of the PDF>/
+    ├── document.json                        Markdown and figure metadata
+    ├── figures/                             figure and formula images
+    └── transcriptions/<provider>_<model>.json  formula transcriptions
+```
+
+- **Which PDF:** the folder is named by a hash of the PDF's content and the Docling version, so a moved or renamed PDF is still found, and an edited one is extracted again.
+- **Size:** about twice the PDF, mostly the images (an 8-page exam: 230 KB PDF, 460 KB cached).
+- **Cleanup:** folders unused for `cacheMaxAgeDays` (30) are deleted. To clear the cache, delete the folder.
+
 ## Configuration
 
 Optional `out-classify.json` in pi's data directory (`~/.pi/agent/out-classify.json` by default):
@@ -153,8 +171,8 @@ Optional `out-classify.json` in pi's data directory (`~/.pi/agent/out-classify.j
 | `pythonPath` | – | Python with Docling for PDFs, instead of the managed venv. |
 | `formulaModel` | – | `"provider/model"` of a vision model in pi's model registry that transcribes PDF formulas to Typst math. It needs image input and a login or key in pi; otherwise there is a warning and formulas stay images. Without it, formulas are returned as images. |
 | `formulaThinkingLevel` | `minimal` | Reasoning effort of the formula model: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. `off` sends none. Higher levels transcribe more carefully but take longer. |
-| `cacheDir` | `~/.cache/pi-out-classify` | Folder for cached formula transcriptions. The default follows `$XDG_CACHE_HOME`, or `%LOCALAPPDATA%` on Windows. |
-| `cacheMaxAgeDays` | 30 | Cached transcriptions unused for this many days are deleted; `0` keeps them forever. |
+| `cacheDir` | `~/.cache/pi-out-classify` | Folder for cached PDF extractions and formula transcriptions (see [Cache](#cache)). The default follows `$XDG_CACHE_HOME`, or `%LOCALAPPDATA%` on Windows. |
+| `cacheMaxAgeDays` | 30 | Cached PDFs unused for this many days are deleted; `0` keeps them forever. |
 
 Paths may start with `~`; relative paths are relative to pi's data directory.
 
@@ -162,6 +180,6 @@ Changes apply after `/reload`.
 
 ## Notes
 
-- **Privacy:** the parts of tool outputs that are classified, the goal and the tool arguments are sent to TypeSafe's API. With a `formulaModel`, the images and text layers of kept formulas are sent to that model's provider. The cache holds document content and is readable only by your user.
+- **Privacy:** the parts of tool outputs that are classified, the goal and the tool arguments are sent to TypeSafe's API. With a `formulaModel`, the images and text layers of kept formulas are sent to that model's provider. The cache holds the extracted content of the PDFs you read and is readable only by your user.
 - **Costs:** classification calls are billed by TypeSafe. They are not counted as LLM usage in pi. Formula transcriptions are billed by the `formulaModel`'s provider (or count toward its subscription); cached formulas cost nothing.
 - out-classify replaces pi's built-in `read` tool with one that has the extra `goal` parameter and otherwise behaves the same.
