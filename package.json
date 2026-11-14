@@ -1,6 +1,6 @@
 {
   "name": "pi-out-classify",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pi extension: filters large tool outputs (text, images, PDFs) down to what is relevant to the agent's task, using TypeSafe's Jev.",
   "type": "module",
   "license": "MIT",
