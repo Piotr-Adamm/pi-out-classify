@@ -25,8 +25,9 @@ const NOTHING_RELEVANT = '[out-classify: nothing in this output was deemed relev
 export function reconstruct(input: ReconstructionInput): Content[] {
   const { sections, results, document } = input
   const kept = (id: string) => results.get(id) !== 'discard'
+  // Formulas are not classified themselves; they follow their section.
   const imageIds = document
-    ? document.figures.map((figure) => figure.id)
+    ? document.figures.filter((figure) => figure.kind === 'figure').map((figure) => figure.id)
     : input.images.map((image) => image.id)
 
   const nothingKept = !sections.some((section) => kept(section.id)) && !imageIds.some(kept)
@@ -54,8 +55,25 @@ export function inlineFormulas(text: string, formulaText: Map<string, string>): 
   })
 }
 
+// Formulas linked from a kept section, in document order; formulas in removed sections are dropped.
+export function keptFormulas(
+  figures: Figure[],
+  sections: OutputSection[],
+  results: ClassifierResults
+): Figure[] {
+  return figures.filter(
+    (figure) =>
+      figure.kind === 'formula' &&
+      sections.some(
+        (section) =>
+          results.get(section.id) !== 'discard' && section.text.includes(`](${figure.id})`)
+      )
+  )
+}
+
 // Sections in order; each followed by the kept figures it links to, even if the section is removed.
-// Transcribed formulas stand in place of their link instead; in a removed section, they follow it.
+// Formulas follow their section: in a kept one, transcribed formulas stand in place of their link and
+// the others follow it as images; in a removed one, they are dropped with it.
 function reconstructDocument(
   sections: OutputSection[],
   figures: Figure[],
@@ -68,14 +86,13 @@ function reconstructDocument(
     const sectionKept = kept(section.id)
     pieces.push(sectionKept ? inlineFormulas(section.text, formulaText) : section)
     for (const figure of figures) {
-      if (!section.text.includes(`](${figure.id})`) || !kept(figure.id)) {
+      if (!section.text.includes(`](${figure.id})`)) {
         continue
       }
-      const typst = formulaText.get(figure.id)
-      if (typst === undefined) {
+      const keptFigure =
+        figure.kind === 'formula' ? sectionKept && !formulaText.has(figure.id) : kept(figure.id)
+      if (keptFigure) {
         pieces.push(figure.image)
-      } else if (!sectionKept) {
-        pieces.push(`$ ${typst} $\n`)
       }
     }
   }

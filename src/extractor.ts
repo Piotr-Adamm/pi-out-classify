@@ -31,6 +31,9 @@ export interface Figure {
   caption: string
   page: number | null
   image: ImageContent
+  // Formulas only: the PDF's text layer, flattened (s2 for s^2). Sent to the classifier with the
+  // formula's section, never to the agent.
+  textLayer?: string
 }
 
 export interface ExtractedDocument {
@@ -205,6 +208,7 @@ export async function extractDocument(
         path: string
         caption: string
         page: number | null
+        textLayer?: string
       }[]
     }
 

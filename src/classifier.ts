@@ -26,6 +26,9 @@ export interface ClassificationTaskContext {
   goalMessageCount?: number
   toolName: string
   toolArguments: { [key: string]: JsonValue }
+  // Formula ID → text layer (documents). Not sent as such: sectionState writes it into the formula
+  // links of the section text, so a section is judged by its formulas too.
+  formulaTextLayers?: Map<string, string>
 }
 
 export function buildClassifierRequest(
@@ -44,7 +47,7 @@ export function buildClassifierRequest(
 
   const { state } = requestBase(context)
   return {
-    state: { ...state, sections: sections.map(sectionState) },
+    state: { ...state, sections: sections.map((section) => sectionState(section, context)) },
     questions: Object.fromEntries(
       sections.map((section) => [
         section.id,
@@ -73,13 +76,28 @@ export function requestBase(context: ClassificationTaskContext) {
 }
 
 // One section's entry in state.sections.
-export function sectionState(section: OutputSection) {
+export function sectionState(section: OutputSection, context: ClassificationTaskContext) {
   return {
     id: section.id,
     start: section.start,
     end: section.end,
-    text: section.text,
+    text: withFormulaTextLayers(section.text, context.formulaTextLayers),
   }
+}
+
+// The classifier's copy of a text: formula links carry their text layer as alt text,
+// ![Formula: F(s) = 1 s2 …](formula-4). The text itself (and what the agent gets) keeps the plain link.
+export function withFormulaTextLayers(
+  text: string,
+  textLayers: Map<string, string> | undefined
+): string {
+  if (!textLayers || textLayers.size === 0) {
+    return text
+  }
+  return text.replace(/!\[Formula\]\((formula-\d+)\)/g, (link, id: string) => {
+    const textLayer = textLayers.get(id)
+    return textLayer ? `![Formula: ${textLayer}](${id})` : link
+  })
 }
 
 // The keep / uncertain / discard question, shared by text sections and images, so both are judged

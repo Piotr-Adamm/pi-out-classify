@@ -79,8 +79,10 @@ def extract(path: Path, image_dir: Path, models_dir: Path) -> dict:
         if item.label == DocItemLabel.FORMULA:
             # Docling would write <!-- formula-not-decoded --> (no formula model) or the PDF's text layer,
             # which flattens exponents and fractions (s2 for s^2). Instead, each formula becomes an image
-            # linked like a figure; the token marks its place in the Markdown.
+            # linked like a figure; the token marks its place in the Markdown. The text layer is kept
+            # for the classifier, which judges a section by its formulas too.
             formula_count += 1
+            text_layer = " ".join((item.orig or item.text or "").split())
             item.text = f"{FORMULA_TOKEN}{formula_count}"
             page = item.prov[0].page_no if item.prov else None
             image = item.get_image(document)
@@ -96,6 +98,7 @@ def extract(path: Path, image_dir: Path, models_dir: Path) -> dict:
                 "path": str(formula_path),
                 "caption": "",
                 "page": page,
+                "textLayer": text_layer,
             })
             continue
 

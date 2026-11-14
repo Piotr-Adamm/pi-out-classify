@@ -20,7 +20,7 @@ export function estimateSectionTokens(
   context: ClassificationTaskContext
 ): number {
   return (
-    tokens(sectionState(section)) +
+    tokens(sectionState(section, context)) +
     tokens({ [section.id]: buildQuestion(`section ${section.id}`, 'section text', context) })
   )
 }

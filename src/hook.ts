@@ -8,16 +8,16 @@ import type { TypeSafeClient } from '@typesafe-ai/sdk'
 import { createClient } from 'pi-jevisual/api'
 import { addFigureContext, batchSections, splitTextBuffer } from './batcher.ts'
 import type { FigureWithContext, OutputBatch, TextBuffer } from './batcher.ts'
-import { classifyImages, classifyTextBatches } from './classifier.ts'
+import { classifyImages, classifyTextBatches, withFormulaTextLayers } from './classifier.ts'
 import type { ClassificationTaskContext, ClassifierResults, ImageToClassify } from './classifier.ts'
 import { CODEMODE_TOOL_NAME, parseCodemodeGoal } from './codemode.ts'
 import { loadConfig } from './config.ts'
 import type { OutClassifyConfig } from './config.ts'
 import { estimateBaseTokens, estimateSectionTokens } from './estimator.ts'
 import { extractDocument, supportsDocumentExtraction } from './extractor.ts'
-import type { ExtractedDocument } from './extractor.ts'
+import type { ExtractedDocument, Figure } from './extractor.ts'
 import { transcribeFormulas } from './formulas.ts'
-import { inlineFormulas, reconstruct } from './reconstructor.ts'
+import { inlineFormulas, keptFormulas, reconstruct } from './reconstructor.ts'
 
 export type OutputType = 'text' | 'images' | 'document' | 'mixed' | 'empty'
 
@@ -114,6 +114,20 @@ function documentOutput(
   }
 }
 
+// All formulas of the document, in document order.
+function getFormulasFromDocument(document: ExtractedDocument): Figure[] {
+  return document.figures.filter((figure) => figure.kind === 'formula')
+}
+
+// Formula ID → text layer, for the classifier's copy of the sections.
+function getFormulaTextLayers(document: ExtractedDocument): Map<string, string> {
+  return new Map(
+    getFormulasFromDocument(document)
+      .filter((formula) => formula.textLayer)
+      .map((formula) => [formula.id, formula.textLayer!])
+  )
+}
+
 // The goal the tool call states itself: read's goal parameter (added by out-classify's read override)
 // or the `// goal:` line of a codemode script. Empty if there is none.
 function toolCallGoal(event: ToolResultEvent): string {
@@ -186,17 +200,13 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     }
   })
 
-  // Typst math for the formulas of `document` that are kept (not discarded in `results`), if a formula
-  // model is configured. Formulas it cannot transcribe are returned as images.
+  // Typst math for the kept formulas, if a formula model is configured. Formulas it cannot transcribe
+  // are returned as images.
   const transcribeKeptFormulas = async (
-    document: ExtractedDocument,
-    results: ClassifierResults,
+    formulas: Figure[],
     ctx: ExtensionContext
   ): Promise<Map<string, string>> => {
     const model = session?.formulaModel
-    const formulas = document.figures.filter(
-      (figure) => figure.kind === 'formula' && results.get(figure.id) !== 'discard'
-    )
     if (!session || !model || formulas.length === 0) {
       return new Map()
     }
@@ -289,15 +299,16 @@ export function registerOutputHook(pi: ExtensionAPI): void {
         return { content: [{ type: 'text', text }], structuredContent: text, isError: true }
       }
 
+      // Formulas are not classified as images (they follow their section), so only figures count.
+      const figureCount = document.figures.filter((figure) => figure.kind === 'figure').length
       if (
         !goal ||
-        (document.markdown.length < config.thresholdChars &&
-          document.figures.length < config.thresholdImages)
+        (document.markdown.length < config.thresholdChars && figureCount < config.thresholdImages)
       ) {
         return documentOutput(
           document,
           config.maxSectionChars,
-          await transcribeKeptFormulas(document, new Map(), ctx)
+          await transcribeKeptFormulas(getFormulasFromDocument(document), ctx)
         )
       }
 
@@ -324,7 +335,10 @@ export function registerOutputHook(pi: ExtensionAPI): void {
 
     const sections = splitTextBuffer(textBuffer, config.maxSectionChars)
     const figures: FigureWithContext[] = document
-      ? addFigureContext(document.figures, sections)
+      ? addFigureContext(
+          document.figures.filter((figure) => figure.kind === 'figure'),
+          sections
+        )
       : []
 
     if (sections.length === 0 && figures.length === 0 && imageBuffer.length === 0) {
@@ -338,6 +352,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
       toolName: event.toolName,
       // Tool arguments arrive as parsed JSON.
       toolArguments: event.input as ClassificationTaskContext['toolArguments'],
+      ...(document ? { formulaTextLayers: getFormulaTextLayers(document) } : {}),
     }
 
     // Sections are always split (figure context needs them), but only batched if text is classified.
@@ -358,19 +373,22 @@ export function registerOutputHook(pi: ExtensionAPI): void {
           ? documentOutput(
               document,
               config.maxSectionChars,
-              await transcribeKeptFormulas(document, new Map(), ctx)
+              await transcribeKeptFormulas(getFormulasFromDocument(document), ctx)
             )
           : undefined
       }
     }
 
     // Figures (documents) or non-document images, never both. Figures carry their caption, or without
-    // one the text of their linking section; other images are judged by the goal only.
+    // one the text of their linking section (with its formula text layers); other images are judged by
+    // the goal only.
     const images: ImageToClassify[] = document
       ? figures.map((figure) => ({
           id: figure.id,
           image: figure.image,
-          caption: figure.caption || figure.context,
+          caption:
+            figure.caption ||
+            (figure.context && withFormulaTextLayers(figure.context, context.formulaTextLayers)),
         }))
       : imageBuffer.map((image) => ({ id: image.id, image: image.block }))
 
@@ -429,16 +447,18 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     const changed = [...results.values()].some(
       (result) => result === 'discard' || result === 'unclassified'
     )
+    // Batched sections carry the IDs in results (split pieces have their own); unbatched text is kept.
+    const classifiedSections =
+      batches.length > 0 ? batches.flatMap((batch) => batch.sections) : sections
     const formulaText = document
-      ? await transcribeKeptFormulas(document, results, ctx)
+      ? await transcribeKeptFormulas(
+          keptFormulas(document.figures, classifiedSections, results),
+          ctx
+        )
       : new Map<string, string>()
     if (!changed) {
       return document ? documentOutput(document, config.maxSectionChars, formulaText) : undefined
     }
-
-    // Batched sections carry the IDs in results (split pieces have their own); unbatched text is kept.
-    const classifiedSections =
-      batches.length > 0 ? batches.flatMap((batch) => batch.sections) : sections
     const readOffset =
       event.toolName === 'read' && typeof event.input.offset === 'number' ? event.input.offset : 1
     // Only content (what the agent sees) is filtered. structuredContent goes to scripts and is passed
