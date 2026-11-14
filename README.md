@@ -63,6 +63,23 @@ pi.registerShortcut("ctrl+shift+p", {
 [Showing lines 1124-2275 of 3348 (50.0KB limit). Use offset=2276 to continue.]
 ````
 
+**Command output:** `bash` with `log show --last 2m --style compact | tail -n 400` (macOS's system log, like `journalctl`), after the user asked "are there any Wi-Fi problems in the system log". bash has no `goal` parameter, so the user's message is the goal. Of 51,196 characters, 21,252 are kept: the Wi-Fi and network entries stay, and the blocks in between are removed. Sections are judged as a whole (at most `maxSectionChars`), so unrelated lines next to relevant ones stay too.
+
+```
+[out-classify: lines 1–98 omitted, deemed not relevant to the task]
+[...]
+2026-11-14 12:35:00.533 Df wifip2pd[62200:bc6b75] [com.apple.awdl:interface] findConflictingService: allowOnenessWombatCoex is true
+[out-classify: lines 112–194 omitted, deemed not relevant to the task]
+[...]
+2026-11-14 12:35:00.962 Df kernel[0:bc6286] () wlan0:com.apple.p2p.awdl0: setScheduleState[11180]: reason:UserTriggered sc:Infra Priority and force:NO, AWDL-restore:No
+2026-11-14 12:35:00.971 Df WindowServer[517:bc59c2] [com.apple.Multitouch:Plugin-Apple Internal Keyboard / Trackpad] [TP] Dispatching digitizer event …
+2026-11-14 12:35:00.980 Df kernel[0:bc6286] () wlan0:com.apple.p2p.en0:   set Datapath Open needsTrigger 0
+[...]
+2026-11-14 12:35:01.065 Df kernel[0:500e15] () wlan0:com.apple.p2p.awdl0: inputPacket: Dropping Multicast input packet because no peer was found for xx:xx:xx:xx:xx:xx
+[...]
+[out-classify: lines 302–330 omitted, deemed not relevant to the task]
+```
+
 **PDF:** an exam, with the goal "the first two questions". The cover pages and Question 3 are omitted. The formula tables on the cover pages are kept, because the questions need them. Formulas are transcribed to Typst math:
 
 ```
