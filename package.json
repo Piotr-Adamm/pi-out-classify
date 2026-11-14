@@ -21,7 +21,8 @@
     "format:fix": "npx -y oxfmt",
     "lint": "npx -y oxlint",
     "lint:fix": "npx -y oxlint --fix",
-    "typecheck": "npx -y -p typescript tsc --noEmit -p ."
+    "typecheck": "npx -y -p typescript tsc --noEmit -p .",
+    "preview.test": "node scripts/preview.test.ts"
   },
   "pi": {
     "extensions": ["./index.ts"]
