@@ -1,7 +1,6 @@
 # pi-out-classify
 
-A [pi](https://pi.dev) extension that keeps large tool outputs out of the agent's context. Before a large
-tool result reaches the model, TypeSafe's Jev (`typesafe/jev-latest`) judges each part of it against what the agent is trying to do. Irrelevant parts are replaced by a short marker:
+A [pi](https://pi.dev) extension that keeps large tool outputs out of the agent's context. Before a large tool result reaches the model, TypeSafe's Jev (`typesafe/jev-latest`) judges each part of it against what the agent is trying to do. Irrelevant parts are replaced by a short marker:
 
 ```
 [out-classify: lines 120–184 omitted, deemed not relevant to the task]
@@ -17,38 +16,77 @@ pi install npm:pi-out-classify
 
 Requirements:
 
-- A TypeSafe API key, either in the `TYPESAFE_API_KEY` environment variable or stored in pi for the
-  `typesafe` provider. Without a key, out-classify is off for the session, with a notice.
+- A TypeSafe API key, either in the `TYPESAFE_API_KEY` environment variable or stored in pi for the `typesafe` provider. Without a key, out-classify is off for the session, with a notice.
 - For PDFs: [uv](https://docs.astral.sh/uv/). Not needed for text and images.
 
 ## How it works
 
-1. **Which outputs:** every result the agent itself receives, including error results. Calls made
-   inside a codemode script are not filtered, because the script needs the raw data; the script's own result is. Outputs below the thresholds pass through unchanged.
+1. **Which outputs:** every result the agent itself receives, including error results. Calls made inside a codemode script are not filtered, because the script needs the raw data; the script's own result is. Outputs below the thresholds pass through unchanged.
 2. **The goal** the output is judged against:
    - `read` gets an optional `goal` parameter ("what should this read establish?").
-   - Codemode scripts state theirs in a first line `// goal: …`. While the `codemode` tool is active,
-     out-classify adds a rule asking for it to the system prompt.
+   - Codemode scripts state theirs in a first line `// goal: …`. While the `codemode` tool is active, out-classify adds a rule asking for it to the system prompt.
    - Otherwise: the user's two latest messages.
 3. **Text** is split into sections of at most `maxSectionChars`, Markdown (`.md` files, PDFs) at headings and paragraphs, everything else at line boundaries. Each section is classified as keep, uncertain or discard; only discarded ones are removed. Warnings, errors and needed context are kept, and in doubt sections are kept. Markers give the omitted line range. `read`'s "Use offset=N to continue" line is always kept.
-4. **Images** in the output are classified by
-   [pi-jevisual](https://www.npmjs.com/package/pi-jevisual), against the same goal.
+4. **Images** in the output are classified by [pi-jevisual](https://www.npmjs.com/package/pi-jevisual), against the same goal.
 5. **PDFs** (`read` on a `.pdf`) are converted with [Docling](https://github.com/docling-project/docling) to Markdown plus figures, instead of pi's raw PDF text. Large ones are then classified like text, with each figure judged together with the text that refers to it. Markers name the pages and headings.
-6. **Formulas** in PDFs are cropped from the page as images, because the PDF's text layer flattens
-   them (`s2` for `s^2`, fractions on one line). They belong to the section they appear in: the
-   classifier judges that section with the formulas' text layer, and they are kept or removed with it.
-   They are not classified as images and don't count toward `thresholdImages`.
-   - With a `formulaModel` configured, the kept formulas are transcribed to Typst math with that
-     vision model and stand in the text as `$ … $`. The model gets the image and the text layer: the
-     image for structure and letter styles, the text layer to check the exact symbols.
-   - Without one, or for formulas that could not be transcribed, they are returned as images after
-     their section.
+6. **Formulas** in PDFs are cropped from the page as images, because the PDF's text layer flattens them (`s2` for `s^2`, fractions on one line). They belong to the section they appear in: the classifier judges that section with the formulas' text layer, and they are kept or removed with it. They are not classified as images and don't count toward `thresholdImages`.
+   - With a `formulaModel` configured, the kept formulas are transcribed to Typst math with that vision model and stand in the text as `$ … $`. The model gets the image and the text layer: the image for structure and letter styles, the text layer to check the exact symbols.
+   - Without one, or for formulas that could not be transcribed, they are returned as images after their section.
 
-   Transcriptions are cached per formula image and model, so a formula is transcribed only once, even if
-   the PDF is moved, renamed or edited elsewhere. A transcription made with a lower
-   `formulaThinkingLevel` than configured is redone.
+   Transcriptions are cached per formula image and model, so a formula is transcribed only once, even if the PDF is moved, renamed or edited elsewhere. A transcription made with a lower `formulaThinkingLevel` than configured is redone.
 
 If classification fails, the affected sections and images are kept, with a notice. A PDF that cannot be extracted gives an error instead of raw PDF syntax.
+
+## Examples
+
+What the agent gets, shortened. Images are real image blocks in the result, shown here as `<image: …>`.
+
+**Text:** `read` on a source file, with the goal "how are the thresholds checked":
+
+```
+[...]
+const READ_FOOTER = /\n\n\[[^\]\n]*Use offset=\d+ to continue\.\]\s*$/
+
+[out-classify: lines 35–216 omitted, deemed not relevant to the task]
+      formulaText = await transcribeFormulas(formulas, {
+        registry: ctx.modelRegistry,
+[...]
+```
+
+**PDF:** an exam, with the goal "the first two questions". The cover pages and Question 3 are omitted. The formula tables on the cover pages are kept, because the questions need them. Formulas are transcribed to Typst math:
+
+```
+[out-classify: text omitted on pages 1–2 (## Exam Analysis III, ## Please do not turn the page yet!), deemed not relevant to the task]
+<image: table of Laplace transforms>
+[...]
+## Question 1
+
+- 1.MC1 [3 Points] Consider the following initial value problem:
+
+$ cases(
+  f'''(t) = cos(2t) + e^(-3t)\, & t > 0,
+  f(0) = 0 quad f'(0) = 0 quad f''(0) = pi,
+) $
+
+Find the Laplace transform L(f) = F of the function f.
+
+$ (A) F(s) = 1/(s^2(s^2 + 2)) + 1/(s^3(s + 3)) - pi/s^3 $
+[...]
+[out-classify: text omitted on page 7 (## Question 3), deemed not relevant to the task]
+```
+
+If nothing is relevant, the whole output becomes one line:
+
+```
+[out-classify: nothing in this output was deemed relevant to the task.]
+```
+
+If TypeSafe fails, the unclassified parts are included and the agent is told so:
+
+```
+[...]
+[out-classify: 2 of 9 sections could not be classified (TypeSafe error) and are included unfiltered.]
+```
 
 ## PDF setup
 
@@ -61,8 +99,7 @@ On the first PDF read, out-classify sets up Docling in pi's data directory (`~/.
 
 Both are kept across out-classify updates. When a new version pins another Docling version, they are rebuilt automatically. Delete the folder to remove them.
 
-To use a Python that already has Docling instead, set `pythonPath` (see below). Then nothing is
-installed except the models. Another Docling version than 2.144.0 works, but gives a warning.
+To use a Python that already has Docling instead, set `pythonPath` (see below). Then nothing is installed except the models. Another Docling version than 2.144.0 works, but gives a warning.
 
 ## Configuration
 
@@ -98,11 +135,6 @@ Changes apply after `/reload`.
 
 ## Notes
 
-- **Privacy:** the parts of tool outputs that are classified, the goal and the tool arguments are sent
-  to TypeSafe's API. With a `formulaModel`, the images and text layers of kept formulas are sent to
-  that model's provider. The cache holds document content and is readable only by your user.
-- **Costs:** classification calls are billed by TypeSafe. They are not counted as LLM usage in pi.
-  Formula transcriptions are billed by the `formulaModel`'s provider (or count toward its
-  subscription); cached formulas cost nothing.
-- out-classify replaces pi's built-in `read` tool with one that has the extra `goal` parameter and
-  otherwise behaves the same.
+- **Privacy:** the parts of tool outputs that are classified, the goal and the tool arguments are sent to TypeSafe's API. With a `formulaModel`, the images and text layers of kept formulas are sent to that model's provider. The cache holds document content and is readable only by your user.
+- **Costs:** classification calls are billed by TypeSafe. They are not counted as LLM usage in pi. Formula transcriptions are billed by the `formulaModel`'s provider (or count toward its subscription); cached formulas cost nothing.
+- out-classify replaces pi's built-in `read` tool with one that has the extra `goal` parameter and otherwise behaves the same.
