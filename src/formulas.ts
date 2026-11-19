@@ -79,22 +79,14 @@ export const transcribeFormulas = async (
   formulas: Figure[],
   options: TranscribeOptions
 ): Promise<Map<string, string>> => {
-  const typst = new Map<string, string>()
   const model = `${options.model.provider}/${options.model.id}`
-  const stored = options.cache ? await readTranscriptionFile(options.cache, model) : {}
-
-  const missing: Figure[] = []
-  for (const formula of formulas) {
-    const cached = stored[formula.id]
-    if (
-      typeof cached?.typst === 'string' &&
-      rank(cached.thinkingLevel) >= rank(options.thinkingLevel)
-    ) {
-      typst.set(formula.id, cached.typst)
-    } else {
-      missing.push(formula)
-    }
-  }
+  const typst = await cachedTranscriptions(
+    formulas,
+    options.model,
+    options.thinkingLevel,
+    options.cache
+  )
+  const missing = formulas.filter((formula) => !typst.has(formula.id))
 
   const transcribed = new Map<string, string>()
   try {
@@ -121,6 +113,30 @@ export const transcribeFormulas = async (
       await saveTranscriptions(options.cache, model, transcribed, options.thinkingLevel).catch(
         () => {}
       )
+    }
+  }
+  return typst
+}
+
+/**
+ * Formula ID → Typst math for the formulas whose transcription is stored, at this thinking level or a
+ * higher one. Calls no model; nothing without a cache item.
+ */
+export const cachedTranscriptions = async (
+  formulas: Figure[],
+  model: Model<Api>,
+  thinkingLevel: FormulaThinkingLevel,
+  cache: CacheItem | undefined
+): Promise<Map<string, string>> => {
+  const typst = new Map<string, string>()
+  if (!cache) {
+    return typst
+  }
+  const stored = await readTranscriptionFile(cache, `${model.provider}/${model.id}`)
+  for (const formula of formulas) {
+    const entry = stored[formula.id]
+    if (typeof entry?.typst === 'string' && rank(entry.thinkingLevel) >= rank(thinkingLevel)) {
+      typst.set(formula.id, entry.typst)
     }
   }
   return typst

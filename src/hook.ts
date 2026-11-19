@@ -16,7 +16,8 @@ import type { OutClassifyConfig } from './config.ts'
 import { estimateBaseTokens, estimateSectionTokens } from './estimator.ts'
 import { extractDocument, resolveReadPath, supportsDocumentExtraction } from './extractor.ts'
 import type { ExtractedDocument, Figure } from './extractor.ts'
-import { transcribeFormulas } from './formulas.ts'
+import { cachedTranscriptions, transcribeFormulas } from './formulas.ts'
+import type { DocumentOutput } from './read.ts'
 import { inlineFormulas, keptFormulas, reconstruct } from './reconstructor.ts'
 
 export type OutputType = 'text' | 'images' | 'document' | 'mixed' | 'empty'
@@ -99,9 +100,24 @@ function lastUserMessages(ctx: ExtensionContext, count: number): string[] {
   return messages
 }
 
+// read's structuredContent (its output for scripts) for a PDF instead of the raw PDF text: the whole
+// extracted Markdown, never filtered, with every figure and formula (DOCUMENT_OUTPUT_SCHEMA).
+function documentStructuredOutput(
+  document: ExtractedDocument,
+  formulaText: Map<string, string>
+): DocumentOutput {
+  return {
+    type: 'document',
+    text: inlineFormulas(document.markdown, formulaText),
+    figures: document.figures.map(({ textLayer: _textLayer, ...figure }) => {
+      const typst = formulaText.get(figure.id)
+      return typst === undefined ? figure : { ...figure, typst }
+    }),
+  }
+}
+
 // The extracted document as tool output, used whenever it is not (or cannot be) classified:
-// everything kept, figures after their linking section. structuredContent (read's output for scripts)
-// becomes the extracted Markdown instead of the raw PDF text.
+// everything kept, figures after their linking section.
 function documentOutput(
   document: ExtractedDocument,
   maxSectionChars: number,
@@ -110,8 +126,13 @@ function documentOutput(
   const sections = splitTextBuffer([{ text: document.markdown, markdown: true }], maxSectionChars)
   return {
     content: reconstruct({ sections, results: new Map(), images: [], document, formulaText }),
-    structuredContent: inlineFormulas(document.markdown, formulaText),
+    structuredContent: documentStructuredOutput(document, formulaText),
   }
+}
+
+function extractionError(error: unknown) {
+  const text = `Could not extract this PDF: ${(error as Error).message}`
+  return { content: [{ type: 'text' as const, text }], structuredContent: text, isError: true }
 }
 
 // All formulas of the document, in document order.
@@ -239,22 +260,59 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     return formulaText
   }
 
+  // Transcriptions of the document's formulas that are already cached; calls no model.
+  const cachedFormulaText = async (document: ExtractedDocument): Promise<Map<string, string>> => {
+    const model = session?.formulaModel
+    if (!session || !model) {
+      return new Map()
+    }
+    return cachedTranscriptions(
+      getFormulasFromDocument(document),
+      model,
+      session.config.formulaThinkingLevel,
+      document.cacheItem
+    ).catch(() => new Map<string, string>())
+  }
+
+  const extract = (
+    event: ToolResultEvent,
+    config: OutClassifyConfig,
+    ctx: ExtensionContext
+  ): Promise<ExtractedDocument> =>
+    extractDocument(resolveReadPath(event.input.path as string, ctx.cwd), {
+      pythonPath: config.pythonPath,
+      cacheDir: config.cacheDir,
+      cacheMaxAgeDays: config.cacheMaxAgeDays,
+      onWarning: (message) => ctx.ui.notify(`out-classify: ${message}`, 'warning'),
+    })
+
   pi.on('tool_result', async (event, ctx) => {
     if (!session) {
       return
     }
     const { config } = session
 
-    // Only what the agent gets is filtered. Calls made by another tool (e.g. tools.read inside a
-    // codemode script) go to that tool, which needs the raw data; its own result is filtered.
-    if (event.parentToolCallId !== undefined) {
-      return
-    }
-
     // Error results are filtered too (e.g. a long failing build log); isError stays as it is.
     const outputType = identifyOutputType(event)
     if (outputType === 'empty') {
       return
+    }
+
+    // Only what the agent gets is filtered. Calls made by another tool (e.g. tools.read inside a
+    // codemode script) go to that tool, which needs the whole data; its own result is filtered. A PDF
+    // is still extracted, since native read returns raw PDF syntax. Its formulas get only cached
+    // transcriptions: a script gets them as images anyway.
+    if (event.parentToolCallId !== undefined) {
+      if (outputType !== 'document') {
+        return
+      }
+      let document: ExtractedDocument
+      try {
+        document = await extract(event, config, ctx)
+      } catch (error) {
+        return extractionError(error)
+      }
+      return documentOutput(document, config.maxSectionChars, await cachedFormulaText(document))
     }
 
     // Thresholds: a part below its threshold passes through unclassified; both below → nothing to do.
@@ -291,15 +349,9 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     if (outputType === 'document') {
       // Native read returns raw PDF syntax, so never fall back to it.
       try {
-        document = await extractDocument(resolveReadPath(event.input.path as string, ctx.cwd), {
-          pythonPath: config.pythonPath,
-          cacheDir: config.cacheDir,
-          cacheMaxAgeDays: config.cacheMaxAgeDays,
-          onWarning: (message) => ctx.ui.notify(`out-classify: ${message}`, 'warning'),
-        })
+        document = await extract(event, config, ctx)
       } catch (error) {
-        const text = `Could not extract this PDF: ${(error as Error).message}`
-        return { content: [{ type: 'text', text }], structuredContent: text, isError: true }
+        return extractionError(error)
       }
 
       // Formulas are not classified as images (they follow their section), so only figures count.
@@ -470,7 +522,7 @@ export function registerOutputHook(pi: ExtensionAPI): void {
     // it would drop it.
     return {
       structuredContent: document
-        ? inlineFormulas(document.markdown, formulaText)
+        ? documentStructuredOutput(document, formulaText)
         : event.structuredContent,
       content: [
         ...reconstruct({
